@@ -158,7 +158,8 @@ def open_zarr_anonymous(url: str) -> xr.Dataset:
     Returns:
         Cleaned xarray Dataset with normalized variable names.
     """
-    ds = xr.open_zarr(url, storage_options={"token": "anon"})
+    kwargs = {"storage_options": {"token": "anon"}} if "://" in url else {}
+    ds = xr.open_zarr(url, **kwargs)
     rename = {}
     for v in ds.data_vars:
         if v != v.strip():
