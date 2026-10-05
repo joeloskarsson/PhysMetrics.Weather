@@ -56,7 +56,7 @@ This generates a set of diagnostic plots in the output directory, including:
 
 * **Time Series Diagnostics**: Global drift of mass and energy (e.g., ``ts_dry_mass_Eg.png``) and balance errors (e.g., ``ts_geostrophic_rmse.png``).
 * **Summary Tables**: Tables summarizing conservation, balance, and spectral metrics across lead times (e.g., ``neurips_table_balance.png``).
-* **Kinetic Energy Spectra**: KE spectra at target lead times (e.g., ``spectra_ke_120h.png``).
+* **Energy Spectra**: Energy vs. wavelength for each computed spectrum variable at target lead times (e.g., ``spectra_ke_500_120h.png``).
 * **Lapse Rate Distributions**: Regional lapse rate histograms (e.g., ``lapse_rate_tropics.png``).
 
 Example Outputs
@@ -72,8 +72,8 @@ Example Outputs
    :width: 100%
    :align: center
 
-.. image:: plots/spectra_ke_240h.png
-   :alt: Kinetic Energy Spectrum 120h
+.. image:: plots/spectra_ke_500_240h.png
+   :alt: Kinetic Energy Spectrum 240h
    :width: 80%
    :align: center
 
@@ -139,5 +139,5 @@ Generated Figures
 * ``ts_hydrostatic_rmse.png``: Hydrostatic balance error timeseries
 * ``ts_geostrophic_rmse.png``: Geostrophic balance error timeseries
 * ``neurips_table_*.png``: Summary tables
-* ``spectra_ke_*.png``: Kinetic energy spectra for target leads
+* ``spectra_<variable>_*.png``: Energy spectra vs. wavelength for each spectrum variable and target lead
 * ``lapse_rate_*.png``: Lapse rate distributions by region

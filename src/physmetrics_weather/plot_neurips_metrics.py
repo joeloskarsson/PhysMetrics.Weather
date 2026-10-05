@@ -17,7 +17,7 @@ Output Plots:
     4. ts_hydrostatic_rmse.png  — Hydrostatic balance error timeseries
     5. ts_geostrophic_rmse.png  — Geostrophic balance error timeseries
     6. neurips_table_*.png      — Summary tables
-    7. spectra_ke_*.png         — Kinetic energy spectra for target leads
+    7. spectra_<var>_*.png      — Energy spectra vs. wavelength for target leads
     8. lapse_rate_*.png         — Lapse rate distributions by region
 
 Usage:
@@ -128,6 +128,30 @@ def pretty_region_name(region: str) -> str:
     return region.replace("_", " ").title()
 
 
+def model_name_from_csv(path: Union[str, Path], prefix: str) -> str:
+    """Extract the model name from a results CSV named ``{prefix}{model}_{year}.csv``.
+
+    Args:
+        path: Path to the CSV file.
+        prefix: Filename prefix, e.g. 'spectra_' or 'physics_evaluation_'.
+
+    Returns:
+        Model name, which may itself contain underscores.
+    """
+    name = Path(path).stem.removeprefix(prefix)
+    model, _, year = name.rpartition("_")
+    if model and (year.isdigit() or year == "unknown"):
+        return model
+    return name
+
+
+def order_models(models) -> List[str]:
+    """Order model names with known models first (in MODELS order), then the rest sorted."""
+    models = set(models)
+    known = [m for m in MODELS if m in models]
+    return known + sorted(models - set(known))
+
+
 def load_summaries(results_dir: Path) -> Dict[str, pd.DataFrame]:
     """Load model summary evaluation CSVs from results directory.
 
@@ -142,8 +166,7 @@ def load_summaries(results_dir: Path) -> Dict[str, pd.DataFrame]:
     for fpath in csv_files:
         fname = Path(fpath).name
         if fname.startswith("physics_evaluation_"):
-            parts = fname.replace("physics_evaluation_", "").replace(".csv", "").split("_")
-            model_name = parts[0]
+            model_name = model_name_from_csv(fpath, "physics_evaluation_")
             df = pd.read_csv(fpath)
             summaries[model_name] = df
     return summaries
@@ -266,6 +289,7 @@ class PhysicsPlotter:
             config: PlotterConfig instance with output path and styling rules.
         """
         self.config = config
+        self.config.reference_label = infer_reference_label(config.results_dir, config.reference_label)
         self.config.outdir.mkdir(parents=True, exist_ok=True)
         sns.set_theme(style=self.config.style, font_scale=1.1)
         self.summaries = load_summaries(self.config.results_dir)
@@ -574,7 +598,7 @@ class PhysicsPlotter:
         return generated
 
     def plot_spectra(self, leads=[12, 120, 240]) -> List[Path]:
-        """Plot spectra for target lead times."""
+        """Plot energy spectra (power vs. wavelength) for each variable and target lead time."""
         EARTH_RADIUS_KM = 6371.0
         generated = []
         csv_paths = list(self.config.results_dir.glob("spectra_*.csv"))
@@ -584,66 +608,63 @@ class PhysicsPlotter:
 
         frames = []
         for path in csv_paths:
-            model = path.stem.replace("spectra_", "").split("_")[0]
-            if "ifs_ens" in path.name: model = "ifs_ens"
-            if model not in MODELS: continue
             df = pd.read_csv(path)
-            df["model"] = model
+            df["model"] = model_name_from_csv(path, "spectra_")
             frames.append(df)
-            
-        if not frames: return generated
+
         df_all = pd.concat(frames, ignore_index=True)
+        df_all = df_all[df_all["wavenumber"] > 0]
+        if df_all.empty: return generated
         self.config.outdir.mkdir(exist_ok=True, parents=True)
         sns.set_theme(style=self.config.style)
 
-        for lt in leads:
-            sub_frames = []
-            for model in MODELS:
-                df_model = df_all[(df_all["model"] == model) & (df_all["variable"].str.startswith("KE")) & (df_all["wavenumber"] > 0)]
-                if df_model.empty: continue
-                avail = df_model["lead_hours"].dropna().unique()
-                if len(avail) == 0: continue
-                nearest = min(avail, key=lambda x: abs(x - lt))
-                df_model_lt = df_model[df_model["lead_hours"] == nearest].copy()
-                if nearest != lt:
-                    df_model_lt["plot_label"] = f"{NICE.get(model, model)} ({int(nearest)}h)*"
-                else:
-                    df_model_lt["plot_label"] = NICE.get(model, model)
-                sub_frames.append(df_model_lt)
-                
-            if not sub_frames: continue
-            sub = pd.concat(sub_frames, ignore_index=True)
-            
-            fig, ax = plt.subplots(figsize=(10, 5))
-            
-            ref_agg = sub.groupby("wavenumber")["power_ref"].mean().reset_index()
-            if not ref_agg.empty:
-                wl = 2.0 * np.pi * EARTH_RADIUS_KM / ref_agg["wavenumber"].values
-                ax.loglog(wl, ref_agg["power_ref"].values, color="black", linewidth=2, label=self.config.reference_label, zorder=5)
+        models = order_models(df_all["model"].unique())
+        ylabels = {"KE": "Kinetic Energy", "Q": "Specific Humidity Variance"}
 
-            for model in MODELS:
-                msub = sub[sub["model"] == model]
-                if msub.empty: continue
-                msub_agg = msub.groupby("wavenumber")["power_pred"].mean().reset_index()
-                wl = 2.0 * np.pi * EARTH_RADIUS_KM / msub_agg["wavenumber"].values
-                label = msub["plot_label"].iloc[0]
-                ax.loglog(wl, msub_agg["power_pred"].values, color=self._get_color(model), linewidth=1.5, label=label)
-                
-            ax.set_title(f"KE Spectrum - {lt}h", fontsize=45)
-            ax.set_xlabel("Wavelength (km)", fontsize=35)
-            ax.set_ylabel("Kinetic Energy", fontsize=35)
-            ax.set_xlim(40000, 100) 
-            
-            if lt == 240:
+        for variable in sorted(df_all["variable"].dropna().unique()):
+            df_var = df_all[df_all["variable"] == variable]
+            var_prefix = variable.split("_")[0].upper()
+
+            for lt in leads:
+                fig, ax = plt.subplots(figsize=(10, 5))
+                ref_plotted = False
+
+                for idx, model in enumerate(models):
+                    df_model = df_var[df_var["model"] == model]
+                    avail = df_model["lead_hours"].dropna().unique()
+                    if len(avail) == 0: continue
+                    nearest = min(avail, key=lambda x: abs(x - lt))
+                    df_model_lt = df_model[df_model["lead_hours"] == nearest]
+                    label = NICE.get(model, model)
+                    if nearest != lt:
+                        label = f"{label} ({int(nearest)}h)*"
+
+                    agg = df_model_lt.groupby("wavenumber")[["power_pred", "power_ref"]].mean().reset_index()
+                    wavelength = 2.0 * np.pi * EARTH_RADIUS_KM / agg["wavenumber"]
+                    if not ref_plotted:
+                        ax.loglog(wavelength, agg["power_ref"], color="black", linewidth=2,
+                                  label=self.config.reference_label, zorder=5)
+                        ref_plotted = True
+                    ax.loglog(wavelength, agg["power_pred"], color=self._get_color(model, idx),
+                              linewidth=1.5, label=label)
+
+                if not ref_plotted:
+                    plt.close(fig)
+                    continue
+
+                ax.set_title(f"{variable.replace('_', ' ')} hPa Spectrum - {lt}h", fontsize=45)
+                ax.set_xlabel("Wavelength (km)", fontsize=35)
+                ax.invert_xaxis()
+                ax.set_ylabel(ylabels.get(var_prefix, "Power"), fontsize=35)
+                ax.tick_params(axis='both', which='major', labelsize=30)
+
                 ax.legend(fontsize=24, bbox_to_anchor=(1.05, 1), loc="upper left")
-                
-            ax.tick_params(axis='both', which='major', labelsize=30)
-            
-            out_file = self.config.outdir / f"spectra_ke_{lt}h.{self.config.file_format}"
-            fig.savefig(out_file, dpi=self.config.dpi, bbox_inches="tight")
-            plt.close(fig)
-            generated.append(out_file)
-            print(f"Saved spectra plot for {lt}h")
+
+                out_file = self.config.outdir / f"spectra_{variable.lower()}_{lt}h.{self.config.file_format}"
+                fig.savefig(out_file, dpi=self.config.dpi, bbox_inches="tight")
+                plt.close(fig)
+                generated.append(out_file)
+                print(f"Saved {variable} spectra plot for {lt}h")
         return generated
 
     def plot_lapse_rates(self, leads=[12, 120, 240]) -> List[Path]:
@@ -656,9 +677,7 @@ class PhysicsPlotter:
 
         frames = []
         for path in csv_paths:
-            model = path.stem.replace("lapse_rate_dist_", "").split("_")[0]
-            if "ifs_ens" in path.name: model = "ifs_ens"
-            if model not in MODELS: continue
+            model = model_name_from_csv(path, "lapse_rate_dist_")
             df = pd.read_csv(path)
             df["model"] = model
             frames.append(df)
@@ -669,6 +688,7 @@ class PhysicsPlotter:
         sns.set_theme(style=self.config.style)
 
         regions = df_all["region"].unique()
+        models = order_models(df_all["model"].unique())
         
         for region in regions:
             fig, axes = plt.subplots(1, len(leads), figsize=(18, 5), sharey=True)
@@ -678,7 +698,7 @@ class PhysicsPlotter:
             
             for ax, lt in zip(axes, leads):
                 sub_frames = []
-                for model in MODELS:
+                for model in models:
                     df_model = df_all[(df_all["model"] == model) & (df_all["region"] == region)]
                     if df_model.empty: continue
                     avail = df_model["lead_hours"].dropna().unique()
@@ -709,7 +729,7 @@ class PhysicsPlotter:
                         y_max = max(y_max, float(np.nanmax(y_ref)))
                     ax.plot(x_ref, y_ref, color="black", linewidth=2.4, label=self.config.reference_label, zorder=10)
 
-                for i, model in enumerate(MODELS):
+                for i, model in enumerate(models):
                     msub = sub[sub["model"] == model]
                     if msub.empty: continue
                     m_agg = (
@@ -725,7 +745,7 @@ class PhysicsPlotter:
                     ax.plot(
                         x,
                         y,
-                        color=self._get_color(model),
+                        color=self._get_color(model, i),
                         linewidth=1.7,
                         alpha=0.95,
                         label=label,
@@ -780,8 +800,7 @@ class PhysicsPlotter:
             df_ts_list = []
             for f in ts_files:
                 df = pd.read_csv(f)
-                model_name = Path(f).stem.replace("time_series_", "").split("_")[0]
-                if "ifs_ens" in Path(f).name: model_name = "ifs_ens"
+                model_name = model_name_from_csv(f, "time_series_")
                 df["model"] = model_name
                 df_ts_list.append(df)
             df_ts = pd.concat(df_ts_list, ignore_index=True)
