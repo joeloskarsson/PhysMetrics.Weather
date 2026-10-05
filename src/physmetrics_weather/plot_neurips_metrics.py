@@ -44,14 +44,14 @@ from scipy.stats import wasserstein_distance
 # ============================================================================
 
 MODEL_COLORS: Dict[str, str] = {
-    "ERA5": "#2c3e50",
-    "IFS": "#7f8c8d",
-    "Pangu": "#e74c3c",
-    "GraphCast": "#2980b9",
-    "FourCastNet": "#2ecc71",
-    "FuXi": "#9b59b6",
-    "Aurora": "#e67e22",
-    "Model": "#d35400",
+    #  "ERA5": "#2c3e50",
+    #  "IFS": "#7f8c8d",
+    #  "Pangu": "#e74c3c",
+    #  "GraphCast": "#2980b9",
+    #  "FourCastNet": "#2ecc71",
+    #  "FuXi": "#9b59b6",
+    #  "Aurora": "#e67e22",
+    #  "Model": "#d35400",
 }
 
 DEFAULT_PALETTE: List[str] = [
@@ -528,10 +528,11 @@ class PhysicsPlotter:
                         else:
                             row_t.append(fmt(val, metric) + suffix)
                             if metric == "effective_resolution_km":
-                                diff = max(val - 111.5, 0)
-                                intensity = min(diff / fixed_scales.get(metric, 500.0), 1.0) * 0.8
+                                #  diff = max(val - 111.5, 0)
+                                #  intensity = min(diff / fixed_scales.get(metric, 500.0), 1.0) * 0.8
+                                intensity = 0 # white
                             else:
-                                intensity = min(abs(val) / fixed_scales.get(metric, max_abs.get(metric, 1.0)), 1.0) * 0.8
+                                intensity = min(abs(val) / max_abs.get(metric, 1.0), 1.0) * 0.8
                             row_c.append(white * (1 - intensity) + red * intensity)
                         
                     cell_texts.append(row_t)
