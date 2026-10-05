@@ -1,3 +1,7 @@
+result_plots
+logs
+
+
 # Python Bytecode and Cache
 __pycache__/
 *.py[cod]
