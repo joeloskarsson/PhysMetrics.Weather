@@ -1,10 +1,12 @@
 """Unit tests for physics_metrics.py using pytest and mock xarray datasets."""
 
 import numpy as np
+import pyshtools as pysh
 import pytest
 import xarray as xr
 
 from physmetrics_weather.physics_metrics import (
+    EARTH_RADIUS,
     _detect_ensemble_dim,
     _detect_level_dim,
     _integrate_column,
@@ -22,6 +24,7 @@ from physmetrics_weather.physics_metrics import (
     compute_spectral_scores,
     compute_total_energy,
     compute_water_mass,
+    compute_zonal_spectrum,
     derive_surface_pressure,
     get_grid_cell_area,
 )
@@ -321,3 +324,103 @@ def test_compute_scalar_spectrum(mock_deterministic_ds):
     assert isinstance(spec, np.ndarray)
     assert len(k) == len(spec)
     assert len(k) > 0
+
+
+def _band_limited_grid(lats, lons, lmax, seed=0):
+    """Random 4pi-normalized SH field band-limited to lmax, its power per degree, and grid values."""
+    clm = pysh.SHCoeffs.from_random(np.ones(lmax + 1), lmax=lmax, normalization="4pi", seed=seed)
+    lat2d, lon2d = np.meshgrid(lats, lons, indexing="ij")
+    return clm.spectrum(), clm.expand(lat=lat2d, lon=lon2d)
+
+
+def _scalar_ds(field, lats, lons, name="temperature"):
+    return xr.Dataset({name: (["latitude", "longitude"], field)}, coords={"latitude": lats, "longitude": lons})
+
+
+def test_ducc0_spectrum_recovers_band_limited_field(mock_grid_coords):
+    """ducc0 CC analysis is exact up to lmax = nlat - 2 on a grid with both poles."""
+    lats, lons, _ = mock_grid_coords
+    lmax = len(lats) - 2
+    power_true, field = _band_limited_grid(lats, lons, lmax)
+
+    k, power = compute_scalar_spectrum(_scalar_ds(field, lats, lons), "temperature", sh_backend="ducc0")
+    np.testing.assert_array_equal(k, np.arange(lmax + 1))
+    np.testing.assert_allclose(power, power_true, rtol=1e-10, atol=1e-12 * power_true.max())
+
+
+def test_ducc0_matches_dh_and_is_orientation_independent(mock_grid_coords):
+    """For a field band-limited below the DH limit both backends agree; S->N input gives the same result."""
+    _, lons, _ = mock_grid_coords
+    # 33 rows with both poles: DH drops the south pole row (32 x 64, lmax 15), CC uses all (lmax 31)
+    lats = np.linspace(90, -90, 33)
+    _, field = _band_limited_grid(lats, lons, lmax=10, seed=1)
+    ds = _scalar_ds(field, lats, lons)
+
+    k_dh, power_dh = compute_scalar_spectrum(ds, "temperature", sh_backend="dh")
+    k_ducc, power_ducc = compute_scalar_spectrum(ds, "temperature", sh_backend="ducc0")
+    assert len(k_ducc) == len(lats) - 1 > len(k_dh)
+    np.testing.assert_allclose(power_ducc[: len(k_dh)], power_dh, rtol=1e-8, atol=1e-12)
+
+    _, power_flipped = compute_scalar_spectrum(ds.isel(latitude=slice(None, None, -1)), "temperature", sh_backend="ducc0")
+    np.testing.assert_allclose(power_flipped, power_ducc, rtol=1e-12)
+
+
+def test_ducc0_rejects_grid_without_poles(mock_grid_coords):
+    """The ducc0 backend only supports equiangular grids including both poles."""
+    _, lons, _ = mock_grid_coords
+    lats = np.linspace(87.1875, -87.1875, 32)
+    ds = _scalar_ds(np.zeros((len(lats), len(lons))), lats, lons)
+    with pytest.raises(ValueError, match="both poles"):
+        compute_scalar_spectrum(ds, "temperature", sh_backend="ducc0")
+
+
+@pytest.mark.parametrize("sh_backend", ["dh", "ducc0"])
+def test_ke_spectrum_is_mean_of_component_spectra(mock_deterministic_ds, mock_ensemble_ds, sh_backend):
+    """KE spectrum equals (S_u + S_v) / 2 for both backends, and handles ensembles."""
+    _, e = compute_ke_spectrum(mock_deterministic_ds, level=500.0, sh_backend=sh_backend)
+    _, s_u = compute_scalar_spectrum(mock_deterministic_ds, "u_component_of_wind", level=500.0, sh_backend=sh_backend)
+    _, s_v = compute_scalar_spectrum(mock_deterministic_ds, "v_component_of_wind", level=500.0, sh_backend=sh_backend)
+    np.testing.assert_allclose(e, 0.5 * (s_u + s_v))
+
+    res_ens = compute_ke_spectrum(mock_ensemble_ds, level=500.0, sh_backend=sh_backend)
+    assert isinstance(res_ens, dict) and len(res_ens) == 3
+
+
+def test_zonal_spectrum_single_wave(mock_grid_coords):
+    """A pure zonal wave gives a single peak matching the WB2 ZonalEnergySpectrum definition."""
+    lats, lons, levels = mock_grid_coords
+    k0, amplitude = 3, 2.0
+    lat2d, lon2d = np.meshgrid(lats, lons, indexing="ij")
+    field = amplitude * np.cos(k0 * np.deg2rad(lon2d)) * np.cos(np.deg2rad(lat2d))
+    # Outside the band the field must not contribute
+    field[np.abs(lat2d) > 55] = 1e6
+
+    k, power, wavelength_km = compute_zonal_spectrum(_scalar_ds(field, lats, lons), "temperature", lat_band=(25.0, 55.0))
+
+    in_band = (np.abs(lats) >= 25) & (np.abs(lats) <= 55)
+    cos_lat = np.cos(np.deg2rad(lats[in_band]))
+    weights = cos_lat / cos_lat.sum()
+    # rfft(norm="forward") of A cos(k0 λ) is A/2 at k0, doubled power: A²/2, times circumference
+    expected = np.sum(weights * (amplitude * cos_lat) ** 2 / 2 * 2 * np.pi * EARTH_RADIUS * cos_lat)
+    assert np.argmax(power) == k0
+    np.testing.assert_allclose(power[k0], expected, rtol=1e-10)
+    np.testing.assert_allclose(np.delete(power, k0), 0.0, atol=1e-10 * expected)
+    assert np.isinf(wavelength_km[0])
+    np.testing.assert_allclose(wavelength_km[k0], 2 * np.pi * EARTH_RADIUS * np.sum(weights * cos_lat) / k0 / 1000)
+
+
+def test_zonal_spectrum_uses_both_hemispheres_and_ke(mock_grid_coords, mock_deterministic_ds, mock_ensemble_ds):
+    """Rings from both hemispheres enter the zonal spectrum; KE is (S_u + S_v) / 2; ensembles give dicts."""
+    lats, lons, _ = mock_grid_coords
+    lat2d, lon2d = np.meshgrid(lats, lons, indexing="ij")
+    field = np.where(lat2d < 0, np.cos(2 * np.deg2rad(lon2d)), 0.0)
+    _, power, _ = compute_zonal_spectrum(_scalar_ds(field, lats, lons), "temperature")
+    assert power[2] > 0
+
+    _, e, _ = compute_zonal_spectrum(mock_deterministic_ds, "KE", level=500.0)
+    _, s_u, _ = compute_zonal_spectrum(mock_deterministic_ds, "u_component_of_wind", level=500.0)
+    _, s_v, _ = compute_zonal_spectrum(mock_deterministic_ds, "v_component_of_wind", level=500.0)
+    np.testing.assert_allclose(e, 0.5 * (s_u + s_v))
+
+    res_ens = compute_zonal_spectrum(mock_ensemble_ds, "Q", level=500.0)
+    assert isinstance(res_ens, dict) and len(res_ens) == 3

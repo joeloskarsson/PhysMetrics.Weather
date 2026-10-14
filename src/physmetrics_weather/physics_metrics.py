@@ -8,7 +8,8 @@ Supported Metrics:
     1. Global Dry Air Mass (conservation)
     2. Global Water Mass (stability)
     3. Global Total Energy (stability)
-    4. Kinetic Energy / Humidity Spectra & Effective Resolution (spectral)
+    4. Kinetic Energy / Humidity Spectra & Effective Resolution (spectral), plus
+       mid-latitude zonal (longitudinal FFT) spectra
     5. Spectral Divergence & Residual (spectral)
     6. Hydrostatic Balance (balance)
     7. Geostrophic Balance (balance)
@@ -22,7 +23,7 @@ Ensemble Support:
     per-member metric evaluations.
 
 Dependencies:
-    numpy, pandas, xarray, scipy, pyshtools.
+    numpy, pandas, xarray, scipy, pyshtools, ducc0.
 """
 
 from __future__ import annotations
@@ -31,6 +32,7 @@ import warnings
 from dataclasses import dataclass, field
 from typing import Any, Dict, Optional, Tuple, Union
 
+import ducc0
 import numpy as np
 import pyshtools as pysh
 import xarray as xr
@@ -67,6 +69,7 @@ LAPSE_RATE_P_TOP: float = 500.0             # hPa – upper pressure level for l
 LAPSE_RATE_P_BOT: float = 850.0             # hPa – lower pressure level for lapse rate
 EFFECTIVE_RES_THRESHOLD: float = 0.5        # spectral power ratio cutoff threshold
 EFFECTIVE_RES_K_MIN: int = 10               # minimum wavenumber for effective resolution
+ZONAL_SPECTRUM_LAT_BAND: Tuple[float, float] = (25.0, 55.0)  # deg – |lat| band for zonal spectra
 
 
 # ============================================================================
@@ -520,90 +523,24 @@ def compute_total_energy(
 # Metric 4 — Spectral Analysis & Effective Resolution
 # ============================================================================
 
-def _ke_spectrum_spharm(
-    u: np.ndarray,
-    v: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute spherical-harmonic kinetic energy spectrum E(l) using pyshtools.
-
-    Args:
-        u: 2D numpy array of zonal wind component (lat, lon).
-        v: 2D numpy array of meridional wind component (lat, lon).
-
-    Returns:
-        Tuple of (wavenumber_array, energy_spectrum_array).
-
-    Raises:
-        ValueError: If input wind arrays are not 2D or grid is invalid Driscoll-Healy.
-    """
-    u = np.asarray(u, dtype=np.float64).squeeze()
-    v = np.asarray(v, dtype=np.float64).squeeze()
-    
-    u = np.nan_to_num(u, nan=0.0)
-    v = np.nan_to_num(v, nan=0.0)
-
-    if u.ndim != 2 or v.ndim != 2:
-        raise ValueError(f"Expected 2D wind fields, got u shape = {u.shape}, v shape = {v.shape}.")
-
-    nlat, nlon = u.shape
-
-    if nlat % 2 != 0:
-        u, v = u[:-1, :], v[:-1, :]
-        nlat -= 1
-    if nlon % 2 != 0:
-        u, v = u[:, :-1], v[:, :-1]
-        nlon -= 1
-
-    if nlon == 2 * nlat:
-        sampling = 2
-        lmax = nlat // 2 - 1
-    elif nlon == nlat:
-        sampling = 1
-        lmax = nlat // 2 - 1
-    else:
-        raise ValueError(
-            f"Grid ({nlat}, {nlon}) is not a valid Driscoll-Healy grid "
-            f"(requires nlon == 2*nlat or nlon == nlat)."
-        )
-
-    u_c = pysh.expand.SHExpandDH(u, sampling=sampling, lmax_calc=lmax)
-    v_c = pysh.expand.SHExpandDH(v, sampling=sampling, lmax_calc=lmax)
-
-    wavenumber = np.arange(lmax + 1)
-    energy = np.zeros(lmax + 1)
-    for l in range(lmax + 1):
-        for m in range(l + 1):
-            pw = u_c[0, l, m] ** 2 + v_c[0, l, m] ** 2
-            if m > 0:
-                pw += u_c[1, l, m] ** 2 + v_c[1, l, m] ** 2
-            energy[l] += 0.5 * pw
-
-    return wavenumber, energy
+SH_BACKENDS: Tuple[str, ...] = ("dh", "ducc0")
 
 
-def _scalar_spectrum_spharm(
-    field: np.ndarray,
-) -> Tuple[np.ndarray, np.ndarray]:
-    """Compute spherical-harmonic power spectrum S(l) of a 2D scalar field.
-
-    Args:
-        field: 2D numpy array of scalar values (lat, lon).
-
-    Returns:
-        Tuple of (wavenumber_array, power_spectrum_array).
-
-    Raises:
-        ValueError: If field array is not 2D or grid is invalid Driscoll-Healy.
-    """
-    field = np.asarray(field, dtype=np.float64).squeeze()
-
-    field = np.nan_to_num(field, nan=0.0)
-
+def _prepare_2d_field(field: np.ndarray) -> np.ndarray:
+    """Convert to a NaN-free float64 2D (lat, lon) array."""
+    field = np.nan_to_num(np.asarray(field, dtype=np.float64).squeeze(), nan=0.0)
     if field.ndim != 2:
         raise ValueError(f"Expected 2D field, got shape = {field.shape}")
+    return field
 
+
+def _sh_power_dh(field: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Power per SH degree from a Driscoll-Healy expansion (pyshtools, 4pi-normalized).
+
+    Rows must run north to south. An odd number of rows or columns is made even by dropping
+    the last one (the south pole row for a grid with both poles), giving lmax = nlat // 2 - 1.
+    """
     nlat, nlon = field.shape
-
     if nlat % 2 != 0:
         field = field[:-1, :]
         nlat -= 1
@@ -613,28 +550,135 @@ def _scalar_spectrum_spharm(
 
     if nlon == 2 * nlat:
         sampling = 2
-        lmax = nlat // 2 - 1
     elif nlon == nlat:
         sampling = 1
-        lmax = nlat // 2 - 1
     else:
         raise ValueError(
             f"Grid ({nlat}, {nlon}) is not a valid Driscoll-Healy grid "
             f"(requires nlon == 2*nlat or nlon == nlat)."
         )
+    lmax = nlat // 2 - 1
 
     coeffs = pysh.expand.SHExpandDH(field, sampling=sampling, lmax_calc=lmax)
+    return np.arange(lmax + 1), (coeffs**2).sum(axis=(0, 2))
 
-    wavenumber = np.arange(lmax + 1)
+
+def _sh_power_ducc0(field: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
+    """Power per SH degree from ducc0 Clenshaw-Curtis analysis (4pi-normalized, as for DH).
+
+    Rows must run north to south on an equiangular grid including both poles, with equispaced
+    longitudes starting at 0. The analysis is exact for fields band-limited to lmax = nlat - 2.
+    """
+    nlat, nlon = field.shape
+    lmax = nlat - 2
+    mmax = min(lmax, (nlon - 1) // 2)
+    alm = ducc0.sht.experimental.analysis_2d(
+        map=field[None], spin=0, lmax=lmax, mmax=mmax, geometry="CC", nthreads=1
+    )[0]
+    # alm are orthonormal, packed by m (m=0: l=0..lmax, m=1: l=1..lmax, ...); m>0 counts twice
+    # for the +-m pair of a real field, and 1/(4pi) converts to 4pi normalization.
     power = np.zeros(lmax + 1)
-    for l in range(lmax + 1):
-        for m in range(l + 1):
-            pw = coeffs[0, l, m] ** 2
-            if m > 0:
-                pw += coeffs[1, l, m] ** 2
-            power[l] += pw
+    start = 0
+    for m in range(mmax + 1):
+        n_l = lmax + 1 - m
+        power[m:] += (1 if m == 0 else 2) * np.abs(alm[start : start + n_l]) ** 2
+        start += n_l
+    return np.arange(lmax + 1), power / (4 * np.pi)
 
-    return wavenumber, power
+
+def _sh_power(field: np.ndarray, sh_backend: str = "ducc0") -> Tuple[np.ndarray, np.ndarray]:
+    """Power per SH degree of a 2D (lat, lon) field, rows north to south."""
+    field = _prepare_2d_field(field)
+    if sh_backend == "dh":
+        return _sh_power_dh(field)
+    if sh_backend == "ducc0":
+        return _sh_power_ducc0(field)
+    raise ValueError(f"Unknown sh_backend '{sh_backend}', expected one of {SH_BACKENDS}.")
+
+
+def _ke_spectrum_spharm(
+    u: np.ndarray,
+    v: np.ndarray,
+    sh_backend: str = "ducc0",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute spherical-harmonic kinetic energy spectrum E(l) = (S_u(l) + S_v(l)) / 2.
+
+    Args:
+        u: 2D numpy array of zonal wind component (lat, lon), rows north to south.
+        v: 2D numpy array of meridional wind component (lat, lon), rows north to south.
+        sh_backend: 'dh' (pyshtools Driscoll-Healy) or 'ducc0' (Clenshaw-Curtis, both poles).
+
+    Returns:
+        Tuple of (wavenumber_array, energy_spectrum_array).
+
+    Raises:
+        ValueError: If input wind arrays are not 2D or the grid is invalid for the backend.
+    """
+    wavenumber, power_u = _sh_power(u, sh_backend)
+    _, power_v = _sh_power(v, sh_backend)
+    return wavenumber, 0.5 * (power_u + power_v)
+
+
+def _scalar_spectrum_spharm(
+    field: np.ndarray,
+    sh_backend: str = "ducc0",
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Compute spherical-harmonic power spectrum S(l) of a 2D scalar field.
+
+    Args:
+        field: 2D numpy array of scalar values (lat, lon), rows north to south.
+        sh_backend: 'dh' (pyshtools Driscoll-Healy) or 'ducc0' (Clenshaw-Curtis, both poles).
+
+    Returns:
+        Tuple of (wavenumber_array, power_spectrum_array).
+
+    Raises:
+        ValueError: If field array is not 2D or the grid is invalid for the backend.
+    """
+    return _sh_power(field, sh_backend)
+
+
+def _lat_lon_dims(da: xr.DataArray) -> Tuple[Optional[str], Optional[str]]:
+    lat_dims = [d for d in da.dims if "lat" in d.lower()]
+    lon_dims = [d for d in da.dims if "lon" in d.lower()]
+    return (lat_dims[0] if lat_dims else None), (lon_dims[0] if lon_dims else None)
+
+
+def _select_level(ds: xr.Dataset, da: xr.DataArray, level: float, level_dim: str) -> xr.DataArray:
+    """Select the pressure level nearest to `level` if `da` has a level dimension."""
+    if level_dim not in da.dims:
+        level_dim = next((d for d in LEVEL_DIM_NAMES if d in da.dims), None)
+        if level_dim is None:
+            return da
+    idx = int(np.abs(ds[level_dim].values - level).argmin())
+    return da.isel({level_dim: idx})
+
+
+def _to_spectral_layout(da: xr.DataArray, sh_backend: str = "dh") -> xr.DataArray:
+    """Transpose to (..., lat, lon); for ducc0 also sort north to south and validate the CC grid."""
+    lat_dim, lon_dim = _lat_lon_dims(da)
+    if lat_dim is None or lon_dim is None:
+        return da
+    da = da.transpose(..., lat_dim, lon_dim)
+    if sh_backend != "ducc0":
+        return da
+
+    da = da.sortby(lat_dim, ascending=False)
+    lat = da[lat_dim].values
+    lon = da[lon_dim].values
+    expected_lat = np.linspace(90.0, -90.0, len(lat))
+    expected_lon = lon[0] + np.arange(len(lon)) * 360.0 / len(lon)
+    if not (
+        np.allclose(lat, expected_lat, atol=1e-6)
+        and np.isclose(lon[0] % 360.0, 0.0, atol=1e-6)
+        and np.allclose(lon, expected_lon, atol=1e-6)
+    ):
+        raise ValueError(
+            "The ducc0 backend requires an equiangular grid including both poles and equispaced "
+            f"longitudes starting at 0 (got {len(lat)} latitudes from {lat[0]} to {lat[-1]}, "
+            f"{len(lon)} longitudes from {lon[0]})."
+        )
+    return da
 
 
 def compute_ke_spectrum(
@@ -643,6 +687,7 @@ def compute_ke_spectrum(
     u_names: Tuple[str, ...] = U_NAMES,
     v_names: Tuple[str, ...] = V_NAMES,
     level_dim: str = "level",
+    sh_backend: str = "ducc0",
 ) -> Union[Tuple[np.ndarray, np.ndarray], Dict[Any, Tuple[np.ndarray, np.ndarray]]]:
     """Compute the kinetic energy spectrum E(l) at a target pressure level.
 
@@ -652,6 +697,8 @@ def compute_ke_spectrum(
         u_names: Candidate variable names for zonal wind.
         v_names: Candidate variable names for meridional wind.
         level_dim: Pressure level dimension name.
+        sh_backend: 'dh' (pyshtools Driscoll-Healy, lmax = nlat//2 - 1) or 'ducc0'
+            (Clenshaw-Curtis on a grid with both poles, lmax = nlat - 2).
 
     Returns:
         Tuple of (wavenumber_array, energy_spectrum_array) for deterministic input,
@@ -659,7 +706,7 @@ def compute_ke_spectrum(
 
     Raises:
         KeyError: If wind variables cannot be found.
-        ValueError: If pressure level dimension cannot be detected.
+        ValueError: If pressure level dimension cannot be detected or the grid is invalid.
     """
     ens_dim = _detect_ensemble_dim(ds)
     if ens_dim is not None and ens_dim in ds.dims:
@@ -671,31 +718,16 @@ def compute_ke_spectrum(
                 u_names=u_names,
                 v_names=v_names,
                 level_dim=level_dim,
+                sh_backend=sh_backend,
             )
         return results
 
-    if level_dim not in ds.dims:
-        level_dim = _detect_level_dim(ds)
-
     u_var = DatasetValidator.require_variable(ds, u_names, "Zonal Wind (u)")
     v_var = DatasetValidator.require_variable(ds, v_names, "Meridional Wind (v)")
+    u = _to_spectral_layout(_select_level(ds, ds[u_var], level, level_dim), sh_backend)
+    v = _to_spectral_layout(_select_level(ds, ds[v_var], level, level_dim), sh_backend)
 
-    u = ds[u_var]
-    v = ds[v_var]
-
-    if level_dim in u.dims:
-        lvls = ds[level_dim].values
-        idx = int(np.abs(lvls - level).argmin())
-        u = u.isel({level_dim: idx})
-        v = v.isel({level_dim: idx})
-
-    lat_dims = [d for d in u.dims if "lat" in d.lower()]
-    lon_dims = [d for d in u.dims if "lon" in d.lower()]
-    if lat_dims and lon_dims:
-        u = u.transpose(..., lat_dims[0], lon_dims[0])
-        v = v.transpose(..., lat_dims[0], lon_dims[0])
-
-    return _ke_spectrum_spharm(u.values, v.values)
+    return _ke_spectrum_spharm(u.values, v.values, sh_backend)
 
 
 def compute_q_spectrum(
@@ -703,6 +735,7 @@ def compute_q_spectrum(
     level: float = DEFAULT_SPECTRUM_LEVEL,
     q_names: Tuple[str, ...] = Q_NAMES,
     level_dim: str = "level",
+    sh_backend: str = "ducc0",
 ) -> Union[Tuple[np.ndarray, np.ndarray], Dict[Any, Tuple[np.ndarray, np.ndarray]]]:
     """Compute specific humidity power spectrum S_q(l) at a single pressure level.
 
@@ -711,6 +744,7 @@ def compute_q_spectrum(
         level: Target pressure level in hPa (default: 500.0).
         q_names: Candidate variable names for specific humidity.
         level_dim: Pressure level dimension name.
+        sh_backend: 'dh' or 'ducc0', see :func:`compute_ke_spectrum`.
 
     Returns:
         Tuple of (wavenumber_array, power_spectrum_array) for deterministic input,
@@ -724,24 +758,13 @@ def compute_q_spectrum(
         results = {}
         for m in ds[ens_dim].values:
             results[m] = compute_q_spectrum(
-                ds.sel({ens_dim: m}), level=level, q_names=q_names, level_dim=level_dim
+                ds.sel({ens_dim: m}), level=level, q_names=q_names, level_dim=level_dim, sh_backend=sh_backend
             )
         return results
 
-    if level_dim not in ds.dims:
-        level_dim = _detect_level_dim(ds)
-
     q_var = DatasetValidator.require_variable(ds, q_names, "Specific Humidity")
-
-    q = ds[q_var]
-    if level_dim in q.dims:
-        lvls = ds[level_dim].values
-        idx = int(np.abs(lvls - level).argmin())
-        q = q.isel({level_dim: idx})
-
-    lat_dims = [d for d in q.dims if "lat" in d.lower()]
-    lon_dims = [d for d in q.dims if "lon" in d.lower()]
-    return _scalar_spectrum_spharm(q.values)
+    q = _to_spectral_layout(_select_level(ds, ds[q_var], level, level_dim), sh_backend)
+    return _scalar_spectrum_spharm(q.values, sh_backend)
 
 
 VAR_ALIASES: Dict[str, Tuple[str, ...]] = {
@@ -755,11 +778,25 @@ VAR_ALIASES: Dict[str, Tuple[str, ...]] = {
 }
 
 
+def _resolve_scalar_var(ds: xr.Dataset, var_name: str) -> str:
+    """Resolve an alias (e.g. 'T', 'Q') or literal variable name to a dataset variable."""
+    var_key = var_name.upper()
+    actual_var = None
+    if var_key in VAR_ALIASES:
+        actual_var = _find_var(ds, VAR_ALIASES[var_key])
+    if actual_var is None and var_name in ds.data_vars:
+        actual_var = var_name
+    if actual_var is None:
+        actual_var = DatasetValidator.require_variable(ds, (var_name,), f"Scalar ({var_name})")
+    return actual_var
+
+
 def compute_scalar_spectrum(
     ds: xr.Dataset,
     var_name: str,
     level: float = DEFAULT_SPECTRUM_LEVEL,
     level_dim: str = "level",
+    sh_backend: str = "ducc0",
 ) -> Union[Tuple[np.ndarray, np.ndarray], Dict[Any, Tuple[np.ndarray, np.ndarray]]]:
     """Compute spherical-harmonic power spectrum S(l) of any scalar variable at a level.
 
@@ -768,6 +805,7 @@ def compute_scalar_spectrum(
         var_name: Name or variable alias candidate string (e.g. 'T', 'Q', 'Z', 'temperature').
         level: Target pressure level in hPa (default: 500.0).
         level_dim: Pressure level dimension name.
+        sh_backend: 'dh' or 'ducc0', see :func:`compute_ke_spectrum`.
 
     Returns:
         Tuple of (wavenumber_array, power_spectrum_array) for deterministic input,
@@ -778,34 +816,103 @@ def compute_scalar_spectrum(
         results = {}
         for m in ds[ens_dim].values:
             results[m] = compute_scalar_spectrum(
-                ds.sel({ens_dim: m}), var_name=var_name, level=level, level_dim=level_dim
+                ds.sel({ens_dim: m}), var_name=var_name, level=level, level_dim=level_dim, sh_backend=sh_backend
             )
         return results
 
-    if level_dim not in ds.dims:
-        level_dim = _detect_level_dim(ds)
+    da = ds[_resolve_scalar_var(ds, var_name)]
+    da = _to_spectral_layout(_select_level(ds, da, level, level_dim), sh_backend)
+    return _scalar_spectrum_spharm(da.values, sh_backend)
 
-    var_key = var_name.upper()
-    actual_var = None
-    if var_key in VAR_ALIASES:
-        actual_var = _find_var(ds, VAR_ALIASES[var_key])
-    if actual_var is None and var_name in ds.data_vars:
-        actual_var = var_name
-    if actual_var is None:
-        actual_var = DatasetValidator.require_variable(ds, (var_name,), f"Scalar ({var_name})")
 
-    da = ds[actual_var]
-    if level_dim in da.dims:
-        lvls = ds[level_dim].values
-        idx = int(np.abs(lvls - level).argmin())
-        da = da.isel({level_dim: idx})
+def _zonal_power(
+    field: np.ndarray,
+    lats: np.ndarray,
+    lat_band: Tuple[float, float] = ZONAL_SPECTRUM_LAT_BAND,
+    earth_radius: float = EARTH_RADIUS,
+) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Zonal (longitudinal FFT) energy spectrum averaged over latitude rings with |lat| in `lat_band`.
 
-    lat_dims = [d for d in da.dims if "lat" in d.lower()]
-    lon_dims = [d for d in da.dims if "lon" in d.lower()]
-    if lat_dims and lon_dims:
-        da = da.transpose(..., lat_dims[0], lon_dims[0])
+    Per ring this follows WeatherBench2's ``ZonalEnergySpectrum``: forward-normalized rfft,
+    |f_k|² doubled for k > 0, times the ring circumference 2πR·cos(lat). Rings are averaged with
+    cos(lat) weights; the returned wavelength 2πR·<cos(lat)>/k uses the same weights, so it is
+    the wavelength at the band's mean circumference.
 
-    return _scalar_spectrum_spharm(da.values)
+    Args:
+        field: 2D numpy array (lat, lon) with equispaced longitudes.
+        lats: Latitudes in degrees of the rows of `field`.
+        lat_band: Inclusive (min, max) of |lat| in degrees.
+        earth_radius: Earth radius in meters.
+
+    Returns:
+        Tuple of (zonal_wavenumber, power, wavelength_km); wavelength is inf at k = 0.
+    """
+    field = _prepare_2d_field(field)
+    abs_lat = np.abs(np.asarray(lats, dtype=np.float64))
+    in_band = (abs_lat >= lat_band[0]) & (abs_lat <= lat_band[1])
+    if not in_band.any():
+        raise ValueError(f"No latitude rows with |lat| in {lat_band}.")
+
+    cos_lat = np.cos(np.deg2rad(abs_lat[in_band]))
+    circumference = 2 * np.pi * earth_radius * cos_lat
+    f_k = np.fft.rfft(field[in_band], axis=-1, norm="forward")
+    ring_power = np.abs(f_k) ** 2
+    ring_power[:, 1:] *= 2
+    ring_power *= circumference[:, None]
+
+    weights = cos_lat / cos_lat.sum()
+    power = weights @ ring_power
+    wavenumber = np.arange(power.shape[0])
+    with np.errstate(divide="ignore"):
+        wavelength_km = (weights @ circumference) / wavenumber / 1000.0
+    return wavenumber, power, wavelength_km
+
+
+def compute_zonal_spectrum(
+    ds: xr.Dataset,
+    var_name: str,
+    level: float = DEFAULT_SPECTRUM_LEVEL,
+    level_dim: str = "level",
+    lat_band: Tuple[float, float] = ZONAL_SPECTRUM_LAT_BAND,
+) -> Union[Tuple[np.ndarray, np.ndarray, np.ndarray], Dict[Any, Tuple[np.ndarray, np.ndarray, np.ndarray]]]:
+    """Compute the mid-latitude zonal spectrum of a variable at a level (as in U-Cast Fig. 13).
+
+    Args:
+        ds: Input xarray Dataset.
+        var_name: 'KE' for kinetic energy (u² + v²)/2, otherwise a scalar alias or variable name.
+        level: Target pressure level in hPa (default: 500.0).
+        level_dim: Pressure level dimension name.
+        lat_band: Inclusive (min, max) of |lat| in degrees, both hemispheres.
+
+    Returns:
+        Tuple of (zonal_wavenumber, power, wavelength_km) for deterministic input,
+        or Dict[member_id, Tuple[...]] for ensemble datasets.
+    """
+    # Ensemble: one spectrum per member
+    ens_dim = _detect_ensemble_dim(ds)
+    if ens_dim is not None and ens_dim in ds.dims:
+        return {
+            m: compute_zonal_spectrum(
+                ds.sel({ens_dim: m}), var_name=var_name, level=level, level_dim=level_dim, lat_band=lat_band
+            )
+            for m in ds[ens_dim].values
+        }
+
+    def _zonal(da: xr.DataArray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
+        da = _to_spectral_layout(_select_level(ds, da, level, level_dim))
+        lat_dim, _ = _lat_lon_dims(da)
+        return _zonal_power(da.values, da[lat_dim].values, lat_band)
+
+    # Kinetic energy: mean of the u and v power spectra, i.e. spectrum of (u² + v²)/2
+    if var_name.upper() == "KE":
+        u = ds[DatasetValidator.require_variable(ds, U_NAMES, "Zonal Wind (u)")]
+        v = ds[DatasetValidator.require_variable(ds, V_NAMES, "Meridional Wind (v)")]
+        wavenumber, power_u, wavelength_km = _zonal(u)
+        _, power_v, _ = _zonal(v)
+        return wavenumber, 0.5 * (power_u + power_v), wavelength_km
+
+    # Scalar: power spectrum of a single variable (alias like 'T', 'Q' or a dataset name)
+    return _zonal(ds[_resolve_scalar_var(ds, var_name)])
 
 
 def _find_effective_resolution(

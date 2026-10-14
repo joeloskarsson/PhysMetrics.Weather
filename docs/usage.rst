@@ -57,6 +57,7 @@ This generates a set of diagnostic plots in the output directory, including:
 * **Time Series Diagnostics**: Global drift of mass and energy (e.g., ``ts_dry_mass_Eg.png``) and balance errors (e.g., ``ts_geostrophic_rmse.png``).
 * **Summary Tables**: Tables summarizing conservation, balance, and spectral metrics across lead times (e.g., ``neurips_table_balance.png``).
 * **Energy Spectra**: Energy vs. wavelength for each computed spectrum variable at target lead times (e.g., ``spectra_ke_500_120h.png``).
+* **Zonal Spectra**: Mid-latitude (25°–55°, both hemispheres) zonal FFT spectra vs. approximate wavelength, as in U-Cast Fig. 13 (e.g., ``zonal_spectra_ke_500_120h.png``).
 * **Lapse Rate Distributions**: Regional lapse rate histograms (e.g., ``lapse_rate_tropics.png``).
 
 Example Outputs
@@ -140,4 +141,5 @@ Generated Figures
 * ``ts_geostrophic_rmse.png``: Geostrophic balance error timeseries
 * ``neurips_table_*.png``: Summary tables
 * ``spectra_<variable>_*.png``: Energy spectra vs. wavelength for each spectrum variable and target lead
+* ``zonal_spectra_<variable>_*.png``: Mid-latitude zonal spectra vs. approximate wavelength for each spectrum variable and target lead
 * ``lapse_rate_*.png``: Lapse rate distributions by region

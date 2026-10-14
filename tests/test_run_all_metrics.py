@@ -9,7 +9,9 @@ from physmetrics_weather.run_all_metrics import (
     _align_ref_to_model,
     _grids_match,
     _parse_lead_times,
+    _parse_spectra_spec,
     _resolve_dates,
+    _spectrum_label,
 )
 
 
@@ -66,3 +68,28 @@ def test_align_ref_to_model():
 
     aligned = _align_ref_to_model(ds_ref, ds_mod)
     assert aligned.sizes["latitude"] == 32
+
+
+def test_parse_spectra_spec():
+    """Bare tokens have no level; explicit levels are parsed as floats."""
+    assert _parse_spectra_spec("KE:850,t2m, Z") == [("KE", 850.0), ("T2M", None), ("Z", None)]
+
+
+def test_spectrum_label():
+    """3D variables are labelled with their level (default 500 hPa), surface variables without."""
+    shape = (2, 4, 8)
+    coords = {"level": [500.0, 850.0], "latitude": np.linspace(90, -90, 4), "longitude": np.arange(8) * 45.0}
+    ds = xr.Dataset(
+        {
+            "u_component_of_wind": (["level", "latitude", "longitude"], np.zeros(shape)),
+            "temperature": (["level", "latitude", "longitude"], np.zeros(shape)),
+            "mean_sea_level_pressure": (["latitude", "longitude"], np.zeros(shape[1:])),
+        },
+        coords=coords,
+    )
+    assert _spectrum_label(ds, "KE", None) == ("KE_500", 500.0)
+    assert _spectrum_label(ds, "t", 850.0) == ("T_850", 850.0)
+    assert _spectrum_label(ds, "MSL", None)[0] == "MSL"
+    assert _spectrum_label(ds, "MSL", 850.0)[0] == "MSL"
+    with pytest.raises(KeyError):
+        _spectrum_label(ds, "Q", None)

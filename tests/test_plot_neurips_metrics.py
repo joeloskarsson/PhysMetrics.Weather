@@ -94,3 +94,40 @@ def test_plot_spectra(tmp_path):
     }
     assert set(generated) == expected
     assert all(p.exists() for p in expected)
+
+
+def test_plot_zonal_spectra(tmp_path):
+    """Zonal spectra are plotted from zonal_spectra_*.csv and kept separate from SH spectra."""
+    matplotlib.use("Agg")
+    results_dir = tmp_path / "results"
+    results_dir.mkdir()
+    wavenumbers = np.arange(0, 20)
+    for model in ["pangu", "gc_plus_ucast"]:
+        rows = [
+            {
+                "date": "2020-01-01",
+                "lead_hours": lead,
+                "variable": variable,
+                "wavenumber": k,
+                "wavelength_km": np.inf if k == 0 else 30000.0 / k,
+                "power_pred": 1.0 / (k + 1) ** 3,
+                "power_ref": 1.1 / (k + 1) ** 3,
+                "ensemble_member": 0,
+            }
+            for lead in [12, 120]
+            for variable in ["KE_500", "T_850", "MSL"]
+            for k in wavenumbers
+        ]
+        pd.DataFrame(rows).to_csv(results_dir / f"zonal_spectra_{model}_2020.csv", index=False)
+
+    outdir = tmp_path / "plots"
+    plotter = PhysicsPlotter(PlotterConfig(results_dir=results_dir, outdir=outdir, dpi=50))
+
+    assert plotter.plot_spectra(leads=[12, 120]) == []
+
+    generated = plotter.plot_zonal_spectra(leads=[12, 120])
+    expected = {
+        outdir / f"zonal_spectra_{v}_{lt}h.png" for v in ["ke_500", "t_850", "msl"] for lt in [12, 120]
+    }
+    assert set(generated) == expected
+    assert all(p.exists() for p in expected)

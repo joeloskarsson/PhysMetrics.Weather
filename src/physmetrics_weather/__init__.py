@@ -18,6 +18,7 @@ from physmetrics_weather.physics_metrics import (
     compute_spectral_scores,
     compute_total_energy,
     compute_water_mass,
+    compute_zonal_spectrum,
     derive_surface_pressure,
     get_grid_cell_area,
 )
@@ -46,6 +47,7 @@ __all__ = [
     "compute_ke_spectrum",
     "compute_q_spectrum",
     "compute_scalar_spectrum",
+    "compute_zonal_spectrum",
     "compute_spectral_scores",
     "compute_hydrostatic_imbalance",
     "compute_geostrophic_imbalance",

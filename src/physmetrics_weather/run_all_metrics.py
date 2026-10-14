@@ -39,9 +39,13 @@ from tqdm import tqdm
 
 # Import physics metrics companion library
 from physmetrics_weather.physics_metrics import (
+    DEFAULT_SPECTRUM_LEVEL,
+    DatasetValidator,
+    LEVEL_DIM_NAMES,
     MSL_NAMES,
     PHI_NAMES,
     Q_NAMES,
+    SH_BACKENDS,
     SP_NAMES,
     T2M_NAMES,
     T_NAMES,
@@ -53,6 +57,7 @@ from physmetrics_weather.physics_metrics import (
     _detect_pred_td_dim,
     _find_effective_resolution,
     _find_var,
+    _resolve_scalar_var,
     compute_conservation_scalars,
     compute_drift_slope,
     compute_geostrophic_imbalance,
@@ -62,6 +67,7 @@ from physmetrics_weather.physics_metrics import (
     compute_q_spectrum,
     compute_scalar_spectrum,
     compute_spectral_scores,
+    compute_zonal_spectrum,
     derive_surface_pressure,
     get_grid_cell_area,
 )
@@ -118,6 +124,7 @@ class EvaluationConfig:
         extended_spectra: Compute extra Q and 850hPa KE spectra.
         sp_ablation: Surface pressure derivation ablation mode.
         spectra: List of (variable_type, level_hpa) tuples for spectra evaluation.
+        sh_backend: Spherical harmonic backend for spectra ('dh' or 'ducc0').
     """
 
     dates: List[str]
@@ -132,7 +139,8 @@ class EvaluationConfig:
     static_zarr: Optional[str] = None
     extended_spectra: bool = False
     sp_ablation: str = "default"
-    spectra: Optional[List[Tuple[str, float]]] = None
+    spectra: Optional[List[Tuple[str, Optional[float]]]] = None
+    sh_backend: str = "ducc0"
 
     def __post_init__(self) -> None:
         if self.lead_times is None:
@@ -406,14 +414,14 @@ def _parse_lead_times(spec: str) -> List[Tuple[str, np.timedelta64]]:
     return result
 
 
-def _parse_spectra_spec(spec: str) -> List[Tuple[str, float]]:
-    """Parse comma-separated spectra specification string (e.g. 'KE:500,Q:500,T:850').
+def _parse_spectra_spec(spec: str) -> List[Tuple[str, Optional[float]]]:
+    """Parse comma-separated spectra specification string (e.g. 'KE:500,Q:500,T:850,T2M').
 
     Args:
-        spec: Comma-separated string of 'VAR:LEVEL' tokens.
+        spec: Comma-separated string of 'VAR[:LEVEL]' tokens.
 
     Returns:
-        List of (variable_type, pressure_level_hpa) tuples.
+        List of (variable_type, pressure_level_hpa) tuples; the level is None if not given.
     """
     result = []
     for token in spec.split(","):
@@ -424,8 +432,31 @@ def _parse_spectra_spec(spec: str) -> List[Tuple[str, float]]:
             var_name, lvl_str = token.split(":", 1)
             result.append((var_name.strip().upper(), float(lvl_str.strip())))
         else:
-            result.append((token.upper(), 500.0))
+            result.append((token.upper(), None))
     return result
+
+
+def _spectrum_label(ds: xr.Dataset, var_type: str, level: Optional[float]) -> Tuple[str, float]:
+    """Label and pressure level for a spectrum of `var_type` in `ds`.
+
+    Variables with a level dimension are labelled 'VAR_LEVEL' (level defaults to
+    DEFAULT_SPECTRUM_LEVEL); surface variables are labelled 'VAR' and any level is ignored.
+
+    Raises:
+        KeyError: If the variable cannot be found in `ds`.
+    """
+    v_key = var_type.upper()
+    if v_key == "KE":
+        var = DatasetValidator.require_variable(ds, U_NAMES, "Zonal Wind (u)")
+    elif v_key in ("Q", "SPECIFIC_HUMIDITY"):
+        var = DatasetValidator.require_variable(ds, Q_NAMES, "Specific Humidity")
+    else:
+        var = _resolve_scalar_var(ds, var_type)
+
+    level = DEFAULT_SPECTRUM_LEVEL if level is None else float(level)
+    if any(d in ds[var].dims for d in LEVEL_DIM_NAMES):
+        return f"{v_key}_{int(level)}", level
+    return v_key, level
 
 
 # ============================================================================
@@ -447,8 +478,15 @@ def _evaluate_one(
     model_name: str = "model",
     extended_spectra: bool = False,
     sp_ablation: str = "default",
-    spectra: Optional[List[Tuple[str, float]]] = None,
-) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]], List[Dict[str, Any]]]:
+    spectra: Optional[List[Tuple[str, Optional[float]]]] = None,
+    sh_backend: str = "ducc0",
+) -> Tuple[
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+    List[Dict[str, Any]],
+]:
     """Fetch, preprocess, and evaluate physics metrics for one date and lead time slice.
 
     Args:
@@ -465,9 +503,11 @@ def _evaluate_one(
         model_name: Identifier name for evaluated weather model.
         extended_spectra: Enable extra spectral calculations.
         sp_ablation: Surface pressure derivation ablation strategy.
+        spectra: List of (variable_type, level_hpa) tuples for spectra evaluation.
+        sh_backend: Spherical harmonic backend for spectra ('dh' or 'ducc0').
 
     Returns:
-        Tuple of (summary_rows, ts_rows, spectrum_rows, lr_dist_rows).
+        Tuple of (summary_rows, ts_rows, spectrum_rows, lr_dist_rows, zonal_spectrum_rows).
     """
     dask.config.set(scheduler="synchronous")
 
@@ -505,6 +545,7 @@ def _evaluate_one(
     summary_rows: List[Dict[str, Any]] = []
     ts_rows: List[Dict[str, Any]] = []
     spectrum_rows: List[Dict[str, Any]] = []
+    zonal_spectrum_rows: List[Dict[str, Any]] = []
     lr_dist_rows: List[Dict[str, Any]] = []
 
     _n_levels: Optional[int] = None
@@ -674,7 +715,7 @@ def _evaluate_one(
     except (KeyError, ValueError, AttributeError, RuntimeError, OSError, IOError) as exc:
         _log(f"    [{counter}] Data loading failed for {date_str} ({lead_label}): {exc}")
         _append_summary("ERROR", None, None, ens_member=0)
-        return summary_rows, ts_rows, spectrum_rows, lr_dist_rows
+        return summary_rows, ts_rows, spectrum_rows, lr_dist_rows, zonal_spectrum_rows
 
     _mode_valid = mode in ("joint", "prediction", "model")
     if _mode_valid and ds_model_full is not None:
@@ -905,23 +946,37 @@ def _evaluate_one(
                         _append_summary(band_key, w1_val, None, ens_member=m)
 
                 # Configurable Target Spectra Evaluation
-                for s_idx, (var_type, lvl_val) in enumerate(spectra_list):
+                for s_idx, (var_type, lvl_spec) in enumerate(spectra_list):
                     v_key = var_type.upper()
-                    var_label = f"{v_key}_{int(lvl_val)}"
+                    try:
+                        var_label, lvl_val = _spectrum_label(ds_model_m, var_type, lvl_spec)
+                    except KeyError as exc:
+                        _log(f"    [{counter}] Spectrum {v_key} failed for member {m}: {exc}")
+                        continue
+                    if lvl_spec is not None and var_label == v_key and m == ens_members[0]:
+                        _log(f"    [{counter}] {v_key} has no level dimension; ignoring level {lvl_spec:g}")
 
                     try:
                         if v_key == "KE":
-                            k_p, e_p = compute_ke_spectrum(ds_model_m, level=lvl_val)
-                            k_r, e_r = compute_ke_spectrum(ds_ref_aligned, level=lvl_val)
+                            k_p, e_p = compute_ke_spectrum(
+                                ds_model_m, level=lvl_val, sh_backend=sh_backend
+                            )
+                            k_r, e_r = compute_ke_spectrum(
+                                ds_ref_aligned, level=lvl_val, sh_backend=sh_backend
+                            )
                         elif v_key in ("Q", "SPECIFIC_HUMIDITY"):
-                            k_p, e_p = compute_q_spectrum(ds_model_m, level=lvl_val)
-                            k_r, e_r = compute_q_spectrum(ds_ref_aligned, level=lvl_val)
+                            k_p, e_p = compute_q_spectrum(
+                                ds_model_m, level=lvl_val, sh_backend=sh_backend
+                            )
+                            k_r, e_r = compute_q_spectrum(
+                                ds_ref_aligned, level=lvl_val, sh_backend=sh_backend
+                            )
                         else:
                             k_p, e_p = compute_scalar_spectrum(
-                                ds_model_m, var_name=var_type, level=lvl_val
+                                ds_model_m, var_name=var_type, level=lvl_val, sh_backend=sh_backend
                             )
                             k_r, e_r = compute_scalar_spectrum(
-                                ds_ref_aligned, var_name=var_type, level=lvl_val
+                                ds_ref_aligned, var_name=var_type, level=lvl_val, sh_backend=sh_backend
                             )
 
                         n_min = min(len(e_p), len(e_r))
@@ -970,10 +1025,35 @@ def _evaluate_one(
                             f"for member {m}: {exc}"
                         )
 
+                    try:
+                        zonal_var = "Q" if v_key == "SPECIFIC_HUMIDITY" else var_type
+                        k_p, e_p, wl_p = compute_zonal_spectrum(
+                            ds_model_m, var_name=zonal_var, level=lvl_val
+                        )
+                        _, e_r, _ = compute_zonal_spectrum(
+                            ds_ref_aligned, var_name=zonal_var, level=lvl_val
+                        )
+                        for k_val, wl_val, p_val, r_val in zip(k_p, wl_p, e_p, e_r):
+                            zonal_spectrum_rows.append({
+                                "date": date_str,
+                                "lead_hours": lead_hours,
+                                "variable": var_label,
+                                "wavenumber": int(k_val),
+                                "wavelength_km": float(wl_val),
+                                "power_pred": float(p_val),
+                                "power_ref": float(r_val),
+                                "ensemble_member": m,
+                            })
+                    except (ValueError, KeyError, AttributeError) as exc:
+                        _log(
+                            f"    [{counter}] Zonal spectrum {var_label} failed "
+                            f"for member {m}: {exc}"
+                        )
+
     if not summary_rows:
         _append_summary("ALL_METRICS_FAILED", None, None, ens_member=0)
 
-    return summary_rows, ts_rows, spectrum_rows, lr_dist_rows
+    return summary_rows, ts_rows, spectrum_rows, lr_dist_rows, zonal_spectrum_rows
 
 
 # ============================================================================
@@ -1014,6 +1094,7 @@ class EvaluationPipeline:
         all_rows: List[Dict[str, Any]] = []
         all_ts_rows: List[Dict[str, Any]] = []
         all_spectrum_rows: List[Dict[str, Any]] = []
+        all_zonal_spectrum_rows: List[Dict[str, Any]] = []
         all_lr_dist_rows: List[Dict[str, Any]] = []
 
         TASK_TIMEOUT = 600
@@ -1037,6 +1118,7 @@ class EvaluationPipeline:
                     self.config.extended_spectra,
                     self.config.sp_ablation,
                     self.config.spectra,
+                    self.config.sh_backend,
                 )
                 futures[fut] = (idx, date_str, lead_label)
 
@@ -1053,7 +1135,7 @@ class EvaluationPipeline:
                 idx, date_str, lead_label = futures[fut]
                 try:
                     res = fut.result(timeout=TASK_TIMEOUT)
-                    summary_rows, ts_rows, spectrum_rows, lr_dist_rows = res
+                    summary_rows, ts_rows, spectrum_rows, lr_dist_rows, zonal_spectrum_rows = res
                     for r in summary_rows:
                         if r.get("metric_name") == "ERROR" and self.config.verbose:
                             err_msg = (
@@ -1068,6 +1150,7 @@ class EvaluationPipeline:
                     all_rows.extend(summary_rows)
                     all_ts_rows.extend(ts_rows)
                     all_spectrum_rows.extend(spectrum_rows)
+                    all_zonal_spectrum_rows.extend(zonal_spectrum_rows)
                     all_lr_dist_rows.extend(lr_dist_rows)
                 except TimeoutError:
                     if self.config.verbose:
@@ -1131,6 +1214,18 @@ class EvaluationPipeline:
             if self.config.verbose:
                 print(f"  ✓ Spectra saved → {spectra_csv} ({len(df_spec)} rows)")
 
+        if all_zonal_spectrum_rows:
+            year_str = self.config.dates[0][:4] if self.config.dates else "unknown"
+            # Prefix must not match the 'spectra_*.csv' glob used for SH spectra
+            zonal_csv = (
+                self.config.output_csv.parent
+                / f"zonal_spectra_{self.config.model_name}_{year_str}.csv"
+            )
+            df_zonal = pd.DataFrame(all_zonal_spectrum_rows)
+            df_zonal.to_csv(zonal_csv, index=False)
+            if self.config.verbose:
+                print(f"  ✓ Zonal spectra saved → {zonal_csv} ({len(df_zonal)} rows)")
+
         if all_lr_dist_rows:
             year_str = self.config.dates[0][:4] if self.config.dates else "unknown"
             lr_dist_csv = (
@@ -1157,7 +1252,8 @@ def run_evaluation(
     static_zarr: Optional[str] = None,
     extended_spectra: bool = False,
     sp_ablation: str = "default",
-    spectra: Optional[List[Tuple[str, float]]] = None,
+    spectra: Optional[List[Tuple[str, Optional[float]]]] = None,
+    sh_backend: str = "ducc0",
 ) -> pd.DataFrame:
     """Backward-compatible wrapper function for running evaluation pipeline.
 
@@ -1175,6 +1271,7 @@ def run_evaluation(
         extended_spectra: Compute extra Q and 850hPa KE spectra.
         sp_ablation: Surface pressure derivation ablation mode.
         spectra: List of (variable, level) tuples for spectral analysis.
+        sh_backend: Spherical harmonic backend for spectra ('dh' or 'ducc0').
 
     Returns:
         pandas DataFrame containing output evaluation summary table.
@@ -1193,6 +1290,7 @@ def run_evaluation(
         extended_spectra=extended_spectra,
         sp_ablation=sp_ablation,
         spectra=spectra,
+        sh_backend=sh_backend,
     )
     pipeline = EvaluationPipeline(config)
     return pipeline.run()
@@ -1269,6 +1367,16 @@ def main() -> None:
         "--spectra", type=str, default=None,
         help="Comma-separated target spectra (e.g. 'KE:500,Q:500,T:850')."
     )
+    parser.add_argument(
+        "--sh-backend",
+        type=str,
+        choices=list(SH_BACKENDS),
+        default="ducc0",
+        help=(
+            "Spherical harmonic backend for spectra: 'dh' (pyshtools Driscoll-Healy, lmax = nlat//2 - 1) "
+            "or 'ducc0' (Clenshaw-Curtis on a grid including both poles, lmax = nlat - 2)."
+        ),
+    )
 
     args = parser.parse_args()
     dates = _resolve_dates(args)
@@ -1296,6 +1404,7 @@ def main() -> None:
         extended_spectra=args.extended_spectra,
         sp_ablation=args.sp_ablation,
         spectra=spec_list,
+        sh_backend=args.sh_backend,
     )
 
 
