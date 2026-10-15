@@ -33,6 +33,7 @@ from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Union
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import LogLocator, NullFormatter
 import numpy as np
 import pandas as pd
 import seaborn as sns
@@ -700,6 +701,11 @@ class PhysicsPlotter:
                 ax.invert_xaxis()
                 ax.set_ylabel(ylabels.get(var_prefix, "Power"), fontsize=35)
                 ax.tick_params(axis='both', which='major', labelsize=30)
+                # Unlabelled minor ticks at 2-9 x 10^k (e.g. 900, 800, ..., 200, 90, ...)
+                ax.xaxis.set_minor_locator(LogLocator(base=10, subs=np.arange(2, 10), numticks=100))
+                ax.xaxis.set_minor_formatter(NullFormatter())
+                ax.tick_params(axis='x', which='major', bottom=True, length=12, width=1.5)
+                ax.tick_params(axis='x', which='minor', bottom=True, length=7, width=1.2)
 
                 ax.legend(fontsize=24, bbox_to_anchor=(1.05, 1), loc="upper left")
 
