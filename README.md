@@ -160,8 +160,9 @@ Required variable names (or standard aliases):
 | `--output-dir` | `./results` | Directory for output CSV results |
 | `--output` | — | Custom destination CSV file path |
 | `--mode` | `joint` | Evaluation mode (`joint`, `ref`, `prediction`, `model`) |
-| `--spectra` | `KE:500` | Comma-separated target spectra specs, e.g. `KE:500,Q:500,T:850` |
+| `--spectra` | `KE:500` | Comma-separated target spectra specs `VAR[:LEVEL]`, e.g. `KE:500,Q:500,T:850,T2M`. Without a level, 3D variables use 500 hPa; surface variables (e.g. `T2M`, `MSL`) have no level and are labelled without one |
 | `--extended-spectra` | off | Compute additional Q and 850 hPa spectra |
+| `--sh-backend` | `ducc0` | Spherical harmonic backend: `ducc0` (Clenshaw–Curtis on an equiangular grid including both poles, lmax = nlat − 2, e.g. 119 at 1.5°; other grids raise an error) or `dh` (pyshtools Driscoll-Healy, drops the south pole row, lmax = nlat//2 − 1). Effective resolution and spectral divergence/residual are computed from this spectrum, so they change with the backend. |
 | `--quiet` | off | Suppress verbose progress logging |
 
 ### `physmetrics-plot`
@@ -223,7 +224,7 @@ plots = plotter.generate_all()
 
 ## Output CSV Formats
 
-`physmetrics-run` generates four types of CSV files in the output directory:
+`physmetrics-run` generates five types of CSV files in the output directory:
 
 ### 1. `physics_evaluation_*.csv` (Main summary metrics)
 ```csv
@@ -242,7 +243,18 @@ date,forecast_hour,dry_mass_Eg,water_mass_kg,total_energy_J,hydrostatic_rmse,geo
 ### 3. `spectra_*.csv` (Spherical harmonic spectra power)
 ```csv
 date,lead_hours,variable,wavenumber,power_pred,power_ref,ensemble_member
-2020-01-01,12,KE:500,10,450.2,455.1,0
+2020-01-01,12,KE_500,10,450.2,455.1,0
+2020-01-01,12,T2M,10,0.81,0.84,0
+```
+
+### 3b. `zonal_spectra_*.csv` (Mid-latitude zonal spectra)
+For each `--spectra` entry: 1D FFT along longitude per latitude ring with 25° ≤ |lat| ≤ 55° (both hemispheres),
+following WeatherBench2's `ZonalEnergySpectrum` (|f_k|² doubled for k > 0, times the ring circumference),
+averaged over rings with cos(lat) weights. `wavelength_km` = 2πR⟨cos lat⟩/k is the wavelength at the band-mean
+circumference, so it is approximate (plotted as "≈ Wavelength").
+```csv
+date,lead_hours,variable,wavenumber,wavelength_km,power_pred,power_ref,ensemble_member
+2020-01-01,12,KE_500,10,3091.5,7.2e7,1.4e8,0
 ```
 
 ### 4. `lapse_rate_dist_*.csv` (Lapse rate probability distributions)

@@ -30,13 +30,18 @@ import argparse
 import glob
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import matplotlib.pyplot as plt
+from matplotlib.ticker import LogLocator, NullFormatter
 import numpy as np
 import pandas as pd
 import seaborn as sns
 from scipy.stats import wasserstein_distance
+
+from physmetrics_weather.physics_metrics import EARTH_RADIUS, ZONAL_SPECTRUM_LAT_BAND
+
+EARTH_RADIUS_KM: float = EARTH_RADIUS / 1000.0
 
 
 # ============================================================================
@@ -598,18 +603,54 @@ class PhysicsPlotter:
         return generated
 
     def plot_spectra(self, leads=[12, 120, 240]) -> List[Path]:
-        """Plot energy spectra (power vs. wavelength) for each variable and target lead time."""
-        EARTH_RADIUS_KM = 6371.0
+        """Plot spherical harmonic spectra (power vs. wavelength 2πR/l) per variable and lead time."""
+        return self._plot_spectra_family(
+            csv_prefix="spectra_",
+            out_prefix="spectra",
+            wavelength_fn=lambda agg: 2.0 * np.pi * EARTH_RADIUS_KM / agg["wavenumber"],
+            xlabel="Wavelength (km)",
+            title_kind="Spectrum",
+            leads=leads,
+        )
+
+    def plot_zonal_spectra(self, leads=[12, 120, 240]) -> List[Path]:
+        """Plot mid-latitude zonal (longitudinal FFT) spectra per variable and lead time.
+
+        The wavelength of zonal wavenumber k varies with latitude; the x-axis uses the
+        band-mean circumference stored in the CSV, hence the approximate-wavelength label.
+        """
+        lat_min, lat_max = ZONAL_SPECTRUM_LAT_BAND
+        return self._plot_spectra_family(
+            csv_prefix="zonal_spectra_",
+            out_prefix="zonal_spectra",
+            wavelength_fn=lambda agg: agg["wavelength_km"],
+            xlabel="≈ Wavelength (km)",
+            title_kind=f"Zonal Spectrum ({lat_min:g}–{lat_max:g}°)",
+            leads=leads,
+            extra_mean_cols=["wavelength_km"],
+        )
+
+    def _plot_spectra_family(
+        self,
+        csv_prefix: str,
+        out_prefix: str,
+        wavelength_fn: Callable[[pd.DataFrame], Any],
+        xlabel: str,
+        title_kind: str,
+        leads=[12, 120, 240],
+        extra_mean_cols: Optional[List[str]] = None,
+    ) -> List[Path]:
+        """Plot power vs. wavelength from '<csv_prefix><model>_<year>.csv' files, averaged over dates and members."""
         generated = []
-        csv_paths = list(self.config.results_dir.glob("spectra_*.csv"))
+        csv_paths = list(self.config.results_dir.glob(f"{csv_prefix}*.csv"))
         if not csv_paths:
-            print("No spectra_*.csv found.")
+            print(f"No {csv_prefix}*.csv found.")
             return generated
 
         frames = []
         for path in csv_paths:
             df = pd.read_csv(path)
-            df["model"] = model_name_from_csv(path, "spectra_")
+            df["model"] = model_name_from_csv(path, csv_prefix)
             frames.append(df)
 
         df_all = pd.concat(frames, ignore_index=True)
@@ -620,6 +661,7 @@ class PhysicsPlotter:
 
         models = order_models(df_all["model"].unique())
         ylabels = {"KE": "Kinetic Energy", "Q": "Specific Humidity Variance"}
+        mean_cols = ["power_pred", "power_ref"] + (extra_mean_cols or [])
 
         for variable in sorted(df_all["variable"].dropna().unique()):
             df_var = df_all[df_all["variable"] == variable]
@@ -639,8 +681,8 @@ class PhysicsPlotter:
                     if nearest != lt:
                         label = f"{label} ({int(nearest)}h)*"
 
-                    agg = df_model_lt.groupby("wavenumber")[["power_pred", "power_ref"]].mean().reset_index()
-                    wavelength = 2.0 * np.pi * EARTH_RADIUS_KM / agg["wavenumber"]
+                    agg = df_model_lt.groupby("wavenumber")[mean_cols].mean().reset_index()
+                    wavelength = wavelength_fn(agg)
                     if not ref_plotted:
                         ax.loglog(wavelength, agg["power_ref"], color="black", linewidth=2,
                                   label=self.config.reference_label, zorder=5)
@@ -652,19 +694,26 @@ class PhysicsPlotter:
                     plt.close(fig)
                     continue
 
-                ax.set_title(f"{variable.replace('_', ' ')} hPa Spectrum - {lt}h", fontsize=45)
-                ax.set_xlabel("Wavelength (km)", fontsize=35)
+                name, _, lvl = variable.rpartition("_")
+                var_title = f"{name} {lvl} hPa" if name and lvl.isdigit() else variable.replace("_", " ")
+                ax.set_title(f"{var_title} {title_kind} - {lt}h", fontsize=28)
+                ax.set_xlabel(xlabel, fontsize=35)
                 ax.invert_xaxis()
                 ax.set_ylabel(ylabels.get(var_prefix, "Power"), fontsize=35)
                 ax.tick_params(axis='both', which='major', labelsize=30)
+                # Unlabelled minor ticks at 2-9 x 10^k (e.g. 900, 800, ..., 200, 90, ...)
+                ax.xaxis.set_minor_locator(LogLocator(base=10, subs=np.arange(2, 10), numticks=100))
+                ax.xaxis.set_minor_formatter(NullFormatter())
+                ax.tick_params(axis='x', which='major', bottom=True, length=12, width=1.5)
+                ax.tick_params(axis='x', which='minor', bottom=True, length=7, width=1.2)
 
                 ax.legend(fontsize=24, bbox_to_anchor=(1.05, 1), loc="upper left")
 
-                out_file = self.config.outdir / f"spectra_{variable.lower()}_{lt}h.{self.config.file_format}"
+                out_file = self.config.outdir / f"{out_prefix}_{variable.lower()}_{lt}h.{self.config.file_format}"
                 fig.savefig(out_file, dpi=self.config.dpi, bbox_inches="tight")
                 plt.close(fig)
                 generated.append(out_file)
-                print(f"Saved {variable} spectra plot for {lt}h")
+                print(f"Saved {variable} {out_prefix} plot for {lt}h")
         return generated
 
     def plot_lapse_rates(self, leads=[12, 120, 240]) -> List[Path]:
@@ -862,6 +911,8 @@ class PhysicsPlotter:
         generated_plots.extend(self.plot_summary_tables(leads=[12, 120, 240]))
         print("Generating spectra plots...")
         generated_plots.extend(self.plot_spectra(leads=[12, 120, 240]))
+        print("Generating zonal spectra plots...")
+        generated_plots.extend(self.plot_zonal_spectra(leads=[12, 120, 240]))
         print("Generating lapse rate distributions...")
         generated_plots.extend(self.plot_lapse_rates(leads=[12, 120, 240]))
 

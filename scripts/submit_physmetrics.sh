@@ -40,6 +40,7 @@ ARGS=(
     --workers 72
     --lead-times 12h,1d,5d,10d
     --output-dir "$OUTPUT_DIR"
+    --spectra KE:500,KE:850,Q:700,T:850,Z:500,T2M,MSL
     "$@"
 )
 
