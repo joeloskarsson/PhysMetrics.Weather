@@ -14,6 +14,7 @@ Output Plots:
     1. ts_dry_mass_Eg.png       — Global dry air mass drift timeseries
     2. ts_water_mass_kg.png     — Global water mass drift timeseries
     3. ts_total_energy_J.png    — Global total energy drift timeseries
+       ts_energy_<term>_J.png   — Global energy terms (absolute values, with reference)
     4. ts_hydrostatic_rmse.png  — Hydrostatic balance error timeseries
     5. ts_geostrophic_rmse.png  — Geostrophic balance error timeseries
     6. neurips_table_*.png      — Summary tables
@@ -39,9 +40,16 @@ import pandas as pd
 import seaborn as sns
 from scipy.stats import wasserstein_distance
 
-from physmetrics_weather.physics_metrics import EARTH_RADIUS, ZONAL_SPECTRUM_LAT_BAND
+from physmetrics_weather.physics_metrics import EARTH_RADIUS, ENERGY_TERM_NAMES, ZONAL_SPECTRUM_LAT_BAND
 
 EARTH_RADIUS_KM: float = EARTH_RADIUS / 1000.0
+
+ENERGY_TERM_TITLES: Dict[str, str] = {
+    "enthalpy": "Global Enthalpy ($c_p T$)",
+    "surface_geopotential": "Global Surface Geopotential Energy ($\\Phi_s$)",
+    "latent": "Global Latent Energy ($L_v q$)",
+    "kinetic": "Global Kinetic Energy ($|\\mathbf{v}|^2/2$)",
+}
 
 
 # ============================================================================
@@ -323,6 +331,7 @@ class PhysicsPlotter:
         filename: str,
         ref_val: Optional[float] = None,
         is_conservation: bool = False,
+        ref_col: Optional[str] = None,
     ) -> Path:
         """Render and save a time series plot with ensemble shading if available.
 
@@ -333,6 +342,8 @@ class PhysicsPlotter:
             ylabel: Y-axis label text string.
             filename: Base filename for the saved figure file (without extension).
             ref_val: Optional horizontal reference baseline value.
+            ref_col: Optional column with reference values per (date, forecast_hour),
+                plotted as a dashed reference timeseries.
 
         Returns:
             Path object pointing to the saved figure image file.
@@ -418,6 +429,20 @@ class PhysicsPlotter:
 
         if ref_val is not None:
             ax.axhline(ref_val, color="#2c3e50", linestyle="--", linewidth=1.5, label="Reference")
+
+        if ref_col is not None and ref_col in df_ts.columns:
+            # Reference values are identical across models/members for a given valid time
+            df_ref = df_ts.dropna(subset=[ref_col]).drop_duplicates(subset=["date", "forecast_hour"])
+            if not df_ref.empty:
+                ref_stats = df_ref.groupby("forecast_hour")[ref_col].mean().reset_index()
+                ax.plot(
+                    ref_stats["forecast_hour"],
+                    ref_stats[ref_col],
+                    label=self.config.reference_label,
+                    color="#2c3e50",
+                    linestyle="--",
+                    linewidth=2,
+                )
 
         ax.set_title(title, fontsize=14, fontweight="bold", pad=12)
         ax.set_xlabel("Forecast Lead Time (hours)", fontsize=12)
@@ -886,6 +911,19 @@ class PhysicsPlotter:
                     is_conservation=True
                 )
                 generated_plots.append(p)
+
+            for term in ENERGY_TERM_NAMES:
+                col = f"energy_{term}_J"
+                if col in df_ts.columns:
+                    p = self.plot_time_series(
+                        df_ts,
+                        col,
+                        ENERGY_TERM_TITLES.get(term, term),
+                        "Energy (J)",
+                        f"ts_{col}",
+                        ref_col=f"ref_{col}",
+                    )
+                    generated_plots.append(p)
 
             if "hydrostatic_rmse" in df_ts.columns:
                 p = self.plot_time_series(

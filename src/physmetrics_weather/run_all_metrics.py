@@ -40,6 +40,7 @@ from tqdm import tqdm
 # Import physics metrics companion library
 from physmetrics_weather.physics_metrics import (
     DEFAULT_SPECTRUM_LEVEL,
+    ENERGY_TERM_NAMES,
     DatasetValidator,
     LEVEL_DIM_NAMES,
     MSL_NAMES,
@@ -464,6 +465,51 @@ def _spectrum_label(ds: xr.Dataset, var_type: str, level: Optional[float]) -> Tu
 # ============================================================================
 
 
+def _compute_ref_energy_series(
+    ds_ref_full: xr.Dataset,
+    ds_static: xr.Dataset,
+    z_sfc: xr.DataArray,
+    area: xr.DataArray,
+    init_time: np.datetime64,
+    lead_tds: np.ndarray,
+    log: Any,
+    counter: int,
+) -> Dict[float, Dict[str, float]]:
+    """Compute reference total energy and its terms at valid times init_time + lead_tds.
+
+    Returns:
+        Dict mapping forecast hour to {'ref_total_energy_J': ..., 'ref_energy_<term>_J': ...}.
+    """
+    needed = set()
+    for names in (T_NAMES, Q_NAMES, U_NAMES, V_NAMES, SP_NAMES, MSL_NAMES):
+        needed.update(names)
+    keep_vars = [v for v in ds_ref_full.data_vars if v.strip() in needed]
+
+    out: Dict[float, Dict[str, float]] = {}
+    for td in lead_tds:
+        hour = float(td / np.timedelta64(1, "h"))
+        row = {"ref_total_energy_J": float("nan")}
+        row.update({f"ref_energy_{name}_J": float("nan") for name in ENERGY_TERM_NAMES})
+        try:
+            # Load one time step at a time to bound memory use
+            ds_ref_v = ds_ref_full[keep_vars].sel(time=init_time + td)
+            if "time" in ds_ref_v.dims:
+                ds_ref_v = ds_ref_v.isel(time=0)
+            ds_ref_v = ds_ref_v.load()
+            level_dim = _detect_level_dim(ds_ref_v)
+            ps_ref_v = _get_ps(ds_ref_v, ds_static, level_dim=level_dim)
+            _, _, energy, terms = compute_conservation_scalars(
+                ds_ref_v, ps_ref_v, area, z_sfc=z_sfc, level_dim=level_dim, return_energy_terms=True
+            )
+            row["ref_total_energy_J"] = float(energy)
+            for name in ENERGY_TERM_NAMES:
+                row[f"ref_energy_{name}_J"] = float(terms[name])
+        except (ValueError, KeyError, AttributeError, OSError) as exc:
+            log(f"    [{counter}] Reference energy failed at +{hour:.0f}h: {exc}")
+        out[hour] = row
+    return out
+
+
 def _evaluate_one(
     model_zarr_path: str,
     ref_zarr_path: str,
@@ -749,11 +795,13 @@ def _evaluate_one(
                 )
                 
                 try:
-                    dry, water, energy = compute_conservation_scalars(
-                        ds_pred_window, ps_pred_window, area_model, z_sfc=z_sfc_model, level_dim=model_level_dim_d
+                    dry, water, energy, energy_terms = compute_conservation_scalars(
+                        ds_pred_window, ps_pred_window, area_model, z_sfc=z_sfc_model,
+                        level_dim=model_level_dim_d, return_energy_terms=True,
                     )
                 except (ValueError, KeyError, AttributeError):
                     dry, water, energy = nan_arr, nan_arr, nan_arr
+                    energy_terms = xr.Dataset({name: nan_arr for name in ENERGY_TERM_NAMES})
                     step_sp_method = "failed"
                     
                 try:
@@ -770,12 +818,18 @@ def _evaluate_one(
                     "dry_mass_Eg": dry,
                     "water_mass_kg": water,
                     "total_energy_J": energy,
+                    **{f"energy_{name}_J": energy_terms[name] for name in ENERGY_TERM_NAMES},
                     "hydrostatic_rmse": hydro,
                     "geostrophic_rmse": geo,
                 })
                 
                 ds_metrics = ds_metrics.compute()
                 df_metrics = ds_metrics.to_dataframe().reset_index()
+
+                # Reference energy terms at the same valid times (shared by all ensemble members)
+                ref_energy_by_hour = _compute_ref_energy_series(
+                    ds_ref_full, ds_static, z_sfc, area, init_time, avail_tds, _log, counter
+                )
                 
                 for m in ens_members:
                     if ens_dim and ens_dim in df_metrics.columns:
@@ -799,6 +853,11 @@ def _evaluate_one(
                             "dry_mass_Eg": float(dry_vals[i]),
                             "water_mass_kg": float(water_vals[i]),
                             "total_energy_J": float(energy_vals[i]),
+                            **{
+                                f"energy_{name}_J": float(df_m[f"energy_{name}_J"].values[i])
+                                for name in ENERGY_TERM_NAMES
+                            },
+                            **ref_energy_by_hour.get(float(h), {}),
                             "hydrostatic_rmse": float(hydro_vals[i]),
                             "geostrophic_rmse": float(geo_vals[i]),
                             "sp_method": step_sp_method,

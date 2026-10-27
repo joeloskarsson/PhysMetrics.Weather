@@ -472,7 +472,10 @@ def compute_water_mass(
 # Metric 3 — Global Total Energy
 # ============================================================================
 
-def compute_total_energy(
+ENERGY_TERM_NAMES: Tuple[str, ...] = ("enthalpy", "surface_geopotential", "latent", "kinetic")
+
+
+def compute_energy_terms(
     ds: xr.Dataset,
     ps: xr.DataArray,
     area: xr.DataArray,
@@ -511,11 +514,41 @@ def compute_total_energy(
     v_val = ds[v_var]
     wspd_sq = u_val**2 + v_val**2
     
-    energy_density = c_p * T + z_aligned + l_v * q + 0.5 * wspd_sq
-    col_energy = _integrate_column(energy_density, levels, ps, level_dim=level_dim)
-    
-    area_aligned = xr.DataArray(area.values, dims=[lat_dim_, lon_dim_], coords={lat_dim_: col_energy[lat_dim_], lon_dim_: col_energy[lon_dim_]})
-    return (area_aligned * col_energy).sum(dim=[lat_dim_, lon_dim_], skipna=True, min_count=1)
+    # Globally integrated energy terms (J); their sum is the total energy
+    densities = {
+        "enthalpy": c_p * T,
+        "surface_geopotential": z_aligned + 0.0 * T,  # broadcast over levels, keep NaN mask of T
+        "latent": l_v * q,
+        "kinetic": 0.5 * wspd_sq,
+    }
+    terms = {}
+    for name, density in densities.items():
+        col = _integrate_column(density, levels, ps, level_dim=level_dim)
+        area_aligned = xr.DataArray(area.values, dims=[lat_dim_, lon_dim_], coords={lat_dim_: col[lat_dim_], lon_dim_: col[lon_dim_]})
+        terms[name] = (area_aligned * col).sum(dim=[lat_dim_, lon_dim_], skipna=True, min_count=1)
+    return xr.Dataset(terms)
+
+
+def compute_total_energy(
+    ds: xr.Dataset,
+    ps: xr.DataArray,
+    area: xr.DataArray,
+    z_sfc: xr.DataArray,
+    t_name: str = "temperature",
+    q_name: str = "q",
+    u_names: Tuple[str, ...] = U_NAMES,
+    v_names: Tuple[str, ...] = V_NAMES,
+    level_dim: str = "level",
+    levels: Optional[np.ndarray] = None,
+    c_pd: float = C_PD,
+    c_pv: float = C_PV,
+    l_v: float = L_V,
+) -> Union[xr.DataArray, float, Dict[Any, float]]:
+    terms = compute_energy_terms(
+        ds, ps, area, z_sfc, t_name=t_name, q_name=q_name, u_names=u_names, v_names=v_names,
+        level_dim=level_dim, levels=levels, c_pd=c_pd, c_pv=c_pv, l_v=l_v,
+    )
+    return sum(terms[name] for name in ENERGY_TERM_NAMES)
 
 
 
@@ -1321,7 +1354,9 @@ def compute_conservation_scalars(
     z_sfc: xr.DataArray,
     level_dim: str = "level",
     levels: Optional[np.ndarray] = None,
-) -> Union[Tuple[xr.DataArray, xr.DataArray, xr.DataArray], Tuple[float, float, float], Dict[Any, Tuple[float, float, float]]]:
+    return_energy_terms: bool = False,
+) -> Union[Tuple[xr.DataArray, ...], Tuple[float, ...], Dict[Any, Tuple[float, ...]]]:
+    """Compute dry mass, water mass and total energy (and the energy terms if return_energy_terms)."""
     if level_dim not in ds.dims:
         level_dim = _detect_level_dim(ds)
     if levels is None and level_dim in ds.coords:
@@ -1334,13 +1369,16 @@ def compute_conservation_scalars(
         dry = compute_dry_air_mass(ds, ps, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv)
         water = compute_water_mass(ds, ps, area, q_name=q_name, level_dim=level_dim, levels=levels, tcwv=tcwv)
         try:
-            energy = compute_total_energy(ds, ps, area, z_sfc=z_sfc, t_name=t_name, q_name=q_name, level_dim=level_dim, levels=levels)
+            terms = compute_energy_terms(ds, ps, area, z_sfc=z_sfc, t_name=t_name, q_name=q_name, level_dim=level_dim, levels=levels)
         except (ValueError, KeyError, AttributeError):
-            energy = xr.full_like(dry, np.nan)
+            terms = xr.Dataset({name: xr.full_like(dry, np.nan) for name in ENERGY_TERM_NAMES})
     else:
         dry = xr.DataArray(np.nan)
         water = xr.DataArray(np.nan)
-        energy = xr.DataArray(np.nan)
+        terms = xr.Dataset({name: xr.DataArray(np.nan) for name in ENERGY_TERM_NAMES})
+    energy = sum(terms[name] for name in ENERGY_TERM_NAMES)
+    if return_energy_terms:
+        return dry, water, energy, terms
     return dry, water, energy
 
 
