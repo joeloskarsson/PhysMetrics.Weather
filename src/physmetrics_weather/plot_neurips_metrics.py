@@ -65,6 +65,7 @@ DEFAULT_PALETTE: List[str] = [
 ]
 
 MODELS = ["hres", "pangu", "graphcast", "neuralgcm", "fuxi", "aurora", "ifs_ens", "Model"]
+DRIFT_METRICS = ["dry_mass_drift_pct_per_day", "water_mass_drift_pct_per_day", "total_energy_drift_pct_per_day"]
 NICE = {
     "hres": "HRES", "pangu": "Pangu", "graphcast": "GraphCast",
     "neuralgcm": "NeuralGCM", "fuxi": "FuXi", "aurora": "Aurora",
@@ -216,9 +217,49 @@ def get_value(df: pd.DataFrame, metric: str, is_ref: bool = False) -> float:
     return float(val) if pd.notna(val) else np.nan
 
 
+# Summary CSVs name their columns differently depending on how they were produced,
+# so the metric-name and value columns are looked up from these candidates in order.
+METRIC_NAME_COLUMNS = ["metric_name", "metric", "variable", "name"]
+VALUE_COLUMNS = ["model_value", "mean_value", "mean_model", "value", "mean", "score"]
+
+
+def find_column(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
+    """Return the first column name in ``candidates`` that exists in ``df``, or None."""
+    for col in candidates:
+        if col in df.columns:
+            return col
+    return None
+
+
+def add_abs_drift_rows(df: pd.DataFrame) -> pd.DataFrame:
+    """Append per-forecast absolute drift rows as ``abs_<metric>`` for each drift metric."""
+    metric_col = find_column(df, METRIC_NAME_COLUMNS)
+    val_col = find_column(df, VALUE_COLUMNS)
+    if metric_col is None or val_col is None:
+        return df
+
+    drift = df[df[metric_col].isin(DRIFT_METRICS)].copy()
+    drift[metric_col] = "abs_" + drift[metric_col]
+    drift[val_col] = pd.to_numeric(drift[val_col], errors="coerce").abs()
+    return pd.concat([df, drift], ignore_index=True)
+
+
+def get_std(df: pd.DataFrame, metric: str) -> float:
+    """Extract the standard deviation of a metric across all forecasts (dates and ensemble members)."""
+    metric_col = find_column(df, METRIC_NAME_COLUMNS)
+    val_col = find_column(df, VALUE_COLUMNS)
+    if metric_col is None or val_col is None:
+        return np.nan
+
+    values = df.loc[df[metric_col] == metric, val_col].astype(float)
+    std = values.std()
+    return float(std) if pd.notna(std) else np.nan
+
+
 def fmt(val: float, metric: str) -> str:
     """Format a metric value for the summary table."""
     if np.isnan(val): return "—"
+    if metric.startswith("abs_"): return f"{val:.4f}"
     if "drift" in metric: return f"{val:+.4f}"
     if "rmse" in metric: return f"{val:.2f}"
     if "resolution" in metric: return f"{val:.1f}"
@@ -434,8 +475,9 @@ class PhysicsPlotter:
         """Generate and save summary tables comparing models across lead times."""
         generated = []
         hardcoded_rmse = get_or_compute_hardcoded_rmse(self.config.results_dir, self.summaries)
-        
-        models_to_plot = list(self.summaries.keys())
+        summaries = {m: add_abs_drift_rows(df) for m, df in self.summaries.items()}
+
+        models_to_plot = list(summaries.keys())
         if not models_to_plot:
             return generated
 
@@ -444,6 +486,11 @@ class PhysicsPlotter:
                 ("dry_mass_drift_pct_per_day", "Dry Mass Drift →0 [%/day]"),
                 ("water_mass_drift_pct_per_day", "Water Mass Drift →0 [%/day]"),
                 ("total_energy_drift_pct_per_day", "Total Energy Drift →0 [%/day]"),
+            ],
+            "Conservation_Absolute": [
+                ("abs_dry_mass_drift_pct_per_day", "|Dry Mass Drift| ↓0 [%/day]"),
+                ("abs_water_mass_drift_pct_per_day", "|Water Mass Drift Anomaly| ↓0 [%/day]"),
+                ("abs_total_energy_drift_pct_per_day", "|Total Energy Drift Anomaly| ↓0 [%/day]"),
             ],
             "Spectral": [
                 ("effective_resolution_km", "Eff. Resolution ↓111.5 [km]"),
@@ -456,21 +503,24 @@ class PhysicsPlotter:
                 ("lapse_rate_wasserstein", "Mean Lapse Rate W-Dist ↓0"),
             ]
         }
-        
+        titles = {
+            "Conservation_Absolute": "Average absolute drift anomaly per forecast (mean ± std of |δ| over forecasts)",
+        }
+
         header_color = np.array([0.9, 0.9, 0.9])
         red = np.array([1.0, 0.75, 0.75])
         white = np.array([1.0, 1.0, 1.0])
 
         for group_name, metrics_list in groups.items():
-            current_models = [m for m in models_to_plot if m != "fuxi"] if group_name == "Conservation_Variability" else models_to_plot
+            current_models = [m for m in models_to_plot if m != "fuxi"] if group_name.startswith("Conservation") else models_to_plot
             model_labels = [NICE.get(m, m) for m in current_models]
 
             max_abs = {}
             for metric, _ in metrics_list:
                 vals = []
                 for m in current_models:
-                    if m in self.summaries:
-                        df = self.summaries[m]
+                    if m in summaries:
+                        df = summaries[m]
                         for lead in leads:
                             lead_col = next((c for c in ["lead_hours", "lead_time_hours", "lead_time", "forecast_hour"] if c in df.columns), None)
                             df_lt = df[(df[lead_col] >= lead - 6) & (df[lead_col] <= lead + 6)] if lead_col else df
@@ -505,8 +555,8 @@ class PhysicsPlotter:
                     for m in current_models:
                         val = np.nan
                         suffix = ""
-                        if m in self.summaries:
-                            df = self.summaries[m]
+                        if m in summaries:
+                            df = summaries[m]
                             lead_col = next((c for c in ["lead_hours", "lead_time_hours", "lead_time", "forecast_hour"] if c in df.columns), None)
                             if lead_col:
                                 df_lt = df[(df[lead_col] >= lead - 6) & (df[lead_col] <= lead + 6)]
@@ -555,7 +605,12 @@ class PhysicsPlotter:
                             row_t.append("—")
                             row_c.append(white)
                         else:
-                            row_t.append(fmt(val, metric) + suffix)
+                            cell = fmt(val, metric)
+                            if "drift" in metric:
+                                std = get_std(df_lt, metric)
+                                if not np.isnan(std):
+                                    cell += f" ± {std:.4f}"
+                            row_t.append(cell + suffix)
                             if metric == "effective_resolution_km":
                                 #  diff = max(val - 111.5, 0)
                                 #  intensity = min(diff / fixed_scales.get(metric, 500.0), 1.0) * 0.8
@@ -572,7 +627,9 @@ class PhysicsPlotter:
             fig, ax = plt.subplots(figsize=(max(1.8 * n_cols, 12), max(0.3 * n_rows, 3.0)))
             ax.axis("off")
             
-            colWidths = [0.45 if group_name in ["Balance", "Conservation_Variability"] else 0.35, 0.12] + [0.15] * len(current_models)
+            model_col_width = 0.27 if group_name.startswith("Conservation") else 0.15
+            metric_col_width = {"Conservation_Absolute": 0.56, "Conservation_Variability": 0.45, "Balance": 0.45}.get(group_name, 0.35)
+            colWidths = [metric_col_width, 0.12] + [model_col_width] * len(current_models)
             table = ax.table(
                 cellText=cell_texts,
                 cellColours=[[tuple(c) for c in row] for row in cell_colors],
@@ -581,6 +638,9 @@ class PhysicsPlotter:
             table.auto_set_font_size(False)
             table.set_fontsize(14)
             table.scale(1.0, 1.6)
+
+            if group_name in titles:
+                ax.set_title(titles[group_name], fontsize=16, fontweight="bold", pad=40)
 
             for j in range(n_cols):
                 table[0, j].set_text_props(fontweight="bold")
