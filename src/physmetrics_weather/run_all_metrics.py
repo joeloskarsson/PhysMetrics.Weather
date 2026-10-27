@@ -776,7 +776,34 @@ def _evaluate_one(
                 
                 ds_metrics = ds_metrics.compute()
                 df_metrics = ds_metrics.to_dataframe().reset_index()
-                
+
+                def _drift_pct(hours: np.ndarray, vals: np.ndarray) -> float:
+                    vals = np.atleast_1d(np.asarray(vals, dtype=np.float64))
+                    if vals.shape != hours.shape:
+                        return float("nan")
+                    slope = compute_drift_slope(hours, vals)
+                    valid = vals[np.isfinite(vals)]
+                    base = float(valid[0]) if len(valid) > 0 else 0.0
+                    return (slope / base * 100.0) if base != 0 and np.isfinite(slope) else float("nan")
+
+                # Water and energy drift are reported relative to the reference drift over the same valid times
+                hours_ref = np.array([float(td / np.timedelta64(1, "h")) for td in avail_tds])
+                try:
+                    ds_ref_window = ds_ref_full.sel(time=init_time + avail_tds)
+                    ds_ref_window = ds_ref_window.drop_vars(
+                        [v for v in ds_ref_window.data_vars if v.strip() not in _NEEDED_VARS]
+                    )
+                    ref_level_dim_d = _detect_level_dim(ds_ref_window)
+                    ps_ref_window = _get_ps(ds_ref_window, ds_static, level_dim=ref_level_dim_d)
+                    _, water_ref_series, energy_ref_series = compute_conservation_scalars(
+                        ds_ref_window, ps_ref_window, area, z_sfc=z_sfc, level_dim=ref_level_dim_d
+                    )
+                    water_ref_drift = _drift_pct(hours_ref, water_ref_series.compute().values)
+                    energy_ref_drift = _drift_pct(hours_ref, energy_ref_series.compute().values)
+                except (ValueError, KeyError, AttributeError) as exc:
+                    _log(f"    [{counter}] Reference drift series failed: {exc}")
+                    water_ref_drift, energy_ref_drift = float("nan"), float("nan")
+
                 for m in ens_members:
                     if ens_dim and ens_dim in df_metrics.columns:
                         df_m = df_metrics[df_metrics[ens_dim] == m].copy()
@@ -821,32 +848,19 @@ def _evaluate_one(
                         _append_summary("hydrostatic_rmse", float(hydro_vals[-1]), ref_hydro, ens_member=m)
                         _append_summary("geostrophic_rmse", float(geo_vals[-1]), ref_geo, ens_member=m)
 
-                    slope_dry = compute_drift_slope(hours_model, dry_vals)
-                    slope_water = compute_drift_slope(hours_model, water_vals)
-                    slope_energy = compute_drift_slope(hours_model, energy_vals)
-
-                    valid_dry = dry_vals[np.isfinite(dry_vals)]
-                    dry_ref = float(valid_dry[0]) if len(valid_dry) > 0 else 0.0
-
-                    valid_water = water_vals[np.isfinite(water_vals)]
-                    water_ref = float(valid_water[0]) if len(valid_water) > 0 else 0.0
-
-                    valid_energy = energy_vals[np.isfinite(energy_vals)]
-                    energy_ref = float(valid_energy[0]) if len(valid_energy) > 0 else 0.0
-
                     _append_summary(
                         "dry_mass_drift_pct_per_day",
-                        (slope_dry / dry_ref * 100.0) if dry_ref != 0 and np.isfinite(slope_dry) else float("nan"),
+                        _drift_pct(hours_model, dry_vals),
                         ens_member=m,
                     )
                     _append_summary(
                         "water_mass_drift_pct_per_day",
-                        (slope_water / water_ref * 100.0) if water_ref != 0 and np.isfinite(slope_water) else float("nan"),
+                        _drift_pct(hours_model, water_vals) - water_ref_drift,
                         ens_member=m,
                     )
                     _append_summary(
                         "total_energy_drift_pct_per_day",
-                        (slope_energy / energy_ref * 100.0) if energy_ref != 0 and np.isfinite(slope_energy) else float("nan"),
+                        _drift_pct(hours_model, energy_vals) - energy_ref_drift,
                         ens_member=m,
                     )
         except (ValueError, KeyError, AttributeError) as exc:
