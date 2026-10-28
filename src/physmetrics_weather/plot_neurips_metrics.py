@@ -355,6 +355,19 @@ class PhysicsPlotter:
                 return color
         return DEFAULT_PALETTE[index % len(DEFAULT_PALETTE)]
 
+    def computed_leads(self) -> List[int]:
+        """Lead times (hours) present in the summary CSVs, i.e. those evaluated with --lead-times.
+
+        Returns:
+            Sorted union of lead hours over all models, or [12, 120, 240] if none are found.
+        """
+        leads = set()
+        for df in self.summaries.values():
+            lead_col = next((c for c in ["lead_hours", "lead_time_hours", "lead_time", "forecast_hour"] if c in df.columns), None)
+            if lead_col:
+                leads.update(int(h) for h in df[lead_col].dropna().unique())
+        return sorted(leads) or [12, 120, 240]
+
     def plot_time_series(
         self,
         df_ts: pd.DataFrame,
@@ -800,7 +813,7 @@ class PhysicsPlotter:
         models = order_models(df_all["model"].unique())
         
         for region in regions:
-            fig, axes = plt.subplots(1, len(leads), figsize=(18, 5), sharey=True)
+            fig, axes = plt.subplots(1, len(leads), figsize=(6 * len(leads), 5), sharey=True)
             if len(leads) == 1: axes = [axes]
             legend_handles = None
             legend_labels = None
@@ -967,14 +980,16 @@ class PhysicsPlotter:
                 )
                 generated_plots.append(p)
 
+        leads = self.computed_leads()
+        print(f"Using lead times from summary CSVs: {[f'{h}h' for h in leads]}")
         print("Generating summary tables...")
-        generated_plots.extend(self.plot_summary_tables(leads=[12, 120, 240]))
+        generated_plots.extend(self.plot_summary_tables(leads=leads))
         print("Generating spectra plots...")
-        generated_plots.extend(self.plot_spectra(leads=[12, 120, 240]))
+        generated_plots.extend(self.plot_spectra(leads=leads))
         print("Generating zonal spectra plots...")
-        generated_plots.extend(self.plot_zonal_spectra(leads=[12, 120, 240]))
+        generated_plots.extend(self.plot_zonal_spectra(leads=leads))
         print("Generating lapse rate distributions...")
-        generated_plots.extend(self.plot_lapse_rates(leads=[12, 120, 240]))
+        generated_plots.extend(self.plot_lapse_rates(leads=leads))
 
         return generated_plots
 
