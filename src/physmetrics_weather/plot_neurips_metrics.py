@@ -17,7 +17,7 @@ Output Plots:
     4. ts_hydrostatic_rmse.png  — Hydrostatic balance error timeseries
     5. ts_geostrophic_rmse.png  — Geostrophic balance error timeseries
     6. neurips_table_*.png      — Summary tables
-    7. spectra_<var>_*.png      — Energy spectra vs. wavelength for target leads
+    7. spectra_<var>_*.png      — Energy spectra and relative error vs. wavelength for target leads
     8. lapse_rate_*.png         — Lapse rate distributions by region
 
 Usage:
@@ -741,8 +741,8 @@ class PhysicsPlotter:
             var_prefix = variable.split("_")[0].upper()
 
             for lt in leads:
-                fig, ax = plt.subplots(figsize=(10, 5))
-                ref_plotted = False
+                fig, (ax, ax_err) = plt.subplots(1, 2, figsize=(22, 5), sharex=True)
+                ref_power = None  # reference spectrum (indexed by wavenumber), shared by all models
 
                 for idx, model in enumerate(models):
                     df_model = df_var[df_var["model"] == model]
@@ -756,31 +756,40 @@ class PhysicsPlotter:
 
                     agg = df_model_lt.groupby("wavenumber")[mean_cols].mean().reset_index()
                     wavelength = wavelength_fn(agg)
-                    if not ref_plotted:
+                    if ref_power is None:
                         ax.loglog(wavelength, agg["power_ref"], color="black", linewidth=2,
                                   label=self.config.reference_label, zorder=5)
-                        ref_plotted = True
-                    ax.loglog(wavelength, agg["power_pred"], color=self._get_color(model, idx),
-                              linewidth=1.5, label=label)
+                        ref_power = agg.set_index("wavenumber")["power_ref"]
+                    color = self._get_color(model, idx)
+                    ax.loglog(wavelength, agg["power_pred"], color=color, linewidth=1.5, label=label)
+                    # Relative error w.r.t. the plotted reference spectrum
+                    ref_at_k = agg["wavenumber"].map(ref_power)
+                    rel_err = (agg["power_pred"] - ref_at_k) / ref_at_k
+                    ax_err.semilogx(wavelength, rel_err, color=color, linewidth=1.5)
 
-                if not ref_plotted:
+                if ref_power is None:
                     plt.close(fig)
                     continue
 
                 name, _, lvl = variable.rpartition("_")
                 var_title = f"{name} {lvl} hPa" if name and lvl.isdigit() else variable.replace("_", " ")
-                ax.set_title(f"{var_title} {title_kind} - {lt}h", fontsize=28)
-                ax.set_xlabel(xlabel, fontsize=35)
-                ax.invert_xaxis()
+                fig.suptitle(f"{var_title} {title_kind} - {lt}h", fontsize=28, y=1.02)
+                ax_err.axhline(0.0, color="black", linewidth=2, zorder=5)
+                ax.invert_xaxis()  # shared x-axis, so also inverts ax_err
                 ax.set_ylabel(ylabels.get(var_prefix, "Power"), fontsize=35)
-                ax.tick_params(axis='both', which='major', labelsize=30)
-                # Unlabelled minor ticks at 2-9 x 10^k (e.g. 900, 800, ..., 200, 90, ...)
-                ax.xaxis.set_minor_locator(LogLocator(base=10, subs=np.arange(2, 10), numticks=100))
-                ax.xaxis.set_minor_formatter(NullFormatter())
-                ax.tick_params(axis='x', which='major', bottom=True, length=12, width=1.5)
-                ax.tick_params(axis='x', which='minor', bottom=True, length=7, width=1.2)
+                ax_err.set_ylabel("Relative Error", fontsize=35)
+                for a in (ax, ax_err):
+                    a.set_xlabel(xlabel, fontsize=35)
+                    a.tick_params(axis='both', which='major', labelsize=30)
+                    # Unlabelled minor ticks at 2-9 x 10^k (e.g. 900, 800, ..., 200, 90, ...)
+                    a.xaxis.set_minor_locator(LogLocator(base=10, subs=np.arange(2, 10), numticks=100))
+                    a.xaxis.set_minor_formatter(NullFormatter())
+                    a.tick_params(axis='x', which='major', bottom=True, length=12, width=1.5)
+                    a.tick_params(axis='x', which='minor', bottom=True, length=7, width=1.2)
 
-                ax.legend(fontsize=24, bbox_to_anchor=(1.05, 1), loc="upper left")
+                fig.subplots_adjust(wspace=0.35)
+                ax_err.legend(*ax.get_legend_handles_labels(), fontsize=24,
+                              bbox_to_anchor=(1.05, 1), loc="upper left")
 
                 out_file = self.config.outdir / f"{out_prefix}_{variable.lower()}_{lt}h.{self.config.file_format}"
                 fig.savefig(out_file, dpi=self.config.dpi, bbox_inches="tight")
