@@ -177,6 +177,14 @@ physmetrics-plot --results-dir ./results --outdir ./plots
 | `--outdir` | `./plots` | Path to directory for saving generated figures |
 | `--reference-label` | `auto` | Reference dataset label override (`auto`, `ERA5`, `IFS`) |
 
+### Paper plots (`scripts/`)
+
+`scripts/plot_all.sh [--results-dir DIR] [--out-dir DIR] [--legend]` generates all paper plots from the result CSVs (default `results/ucast/` → `result_plots/paper/`), averaging over the seed runs of each model:
+
+- `scripts/plot_physmetrics.py`: time series of dry air mass, water mass and total energy change, and hydrostatic/geostrophic balance RMSE vs. lead time.
+- `scripts/plot_spectra.py`: power spectra and their relative error w.r.t. ERA5, per variable and lead time.
+- `scripts/plot_common.py`, `scripts/plot_style.py`: shared CSV loading and plot style (`plot_style.py` is kept identical to the copy in the U-cast repo).
+
 ---
 
 ## Python API Usage
