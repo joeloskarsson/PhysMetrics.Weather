@@ -183,7 +183,7 @@ physmetrics-plot --results-dir ./results --outdir ./plots
 
 - `scripts/plot_physmetrics.py`: time series of dry air mass, water mass and total energy change, and hydrostatic/geostrophic balance RMSE vs. lead time.
 - `scripts/plot_spectra.py`: power spectra and their relative error w.r.t. ERA5, per variable and lead time.
-- `scripts/plot_common.py`, `scripts/plot_style.py`: shared CSV loading and plot style (`plot_style.py` is kept identical to the copy in the U-cast repo).
+- `scripts/plot_style.py`: shared plot style (kept in sync with the copy in the U-cast repo) and loading of result CSVs.
 
 ---
 

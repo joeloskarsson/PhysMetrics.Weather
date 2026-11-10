@@ -13,12 +13,12 @@ Usage:
 
 import argparse
 import warnings
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-import plot_common
 import plot_style
 
 EARTH_RADIUS_KM = 6371.0
@@ -86,7 +86,7 @@ def load_spectra(results_dir, cache_dir):
     for model in plot_style.MODEL_ORDER:
         spectra[model] = {}
         for run in plot_style.seed_run_names(model):
-            path = plot_common.result_path(results_dir, "spectra", run)
+            path = Path(results_dir) / plot_style.RESULT_FILENAME.format(kind="spectra", run=run)
             if not path.exists():
                 warnings.warn(f"Missing {path}, averaging {model} over the remaining seeds")
                 continue
@@ -156,7 +156,7 @@ def plot_variable_lead(spectra, reference, variable, lead, out_dir):
     ref = reference.loc[(lead, variable)]
     wavenumbers = ref.index.to_numpy()
     power_label, rel_error_label = variable_axis_labels(variable)
-    out_name = f"{variable.lower()}_{plot_common.lead_label(lead)}"
+    out_name = f"{variable.lower()}_{plot_style.lead_label(lead)}"
 
     fig, ax = plt.subplots(figsize=(plot_style.FIG_WIDTH, plot_style.LINE_PLOT_HEIGHT))
     fig_err, ax_err = plt.subplots(figsize=(plot_style.FIG_WIDTH, plot_style.LINE_PLOT_HEIGHT))
@@ -202,7 +202,7 @@ def run(results_dir, out_dir, leads=None, use_cache=True, save_with_legend=False
 
 
 def main():
-    parser = plot_common.add_common_args(argparse.ArgumentParser(description=__doc__))
+    parser = plot_style.add_common_args(argparse.ArgumentParser(description=__doc__))
     parser.add_argument("--leads", type=int, nargs="+", help="Lead times [h], default all")
     parser.add_argument("--no-cache", action="store_true", help="Do not cache date-mean spectra")
     args = parser.parse_args()

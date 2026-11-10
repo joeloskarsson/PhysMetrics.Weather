@@ -1,19 +1,11 @@
-"""
-Shared plot style for the paper figures (ICML 2-column template).
-
-Imported by the plotting scripts in this directory. An identical copy lives in
-physmetrics/scripts/plot_style.py; keep the two in sync.
-
-Line plots are sized so that two fit side-by-side within one column, with
-text at roughly caption size. Full-page figures (e.g. map grids) are sized so
-two fit side-by-side across the page.
-"""
+"""Shared plot style (as in ucast/scripts/plot_style.py), plus loading of physmetrics result CSVs"""
 
 import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
+import pandas as pd
 
 # --- Sizes, in inches ---
 COLUMN_WIDTH = 3.25
@@ -260,3 +252,38 @@ def save_legend(out_path_without_suffix, handles):
     if legend_width > LEGEND_WIDTH:
         warnings.warn(f"Legend {out_path_without_suffix} is {legend_width:.2f} in wide, wider than {LEGEND_WIDTH} in")
     save_figure(fig, out_path_without_suffix)
+
+
+# ===== Physmetrics result loading (not in the ucast copy) =====
+
+REPO_ROOT = Path(__file__).resolve().parents[1]
+DEFAULT_RESULTS_DIR = REPO_ROOT / "results" / "ucast"
+DEFAULT_OUT_DIR = REPO_ROOT / "result_plots" / "paper"
+RESULT_FILENAME = "{kind}_{run}_2020.csv"
+
+HOURS_PER_DAY = 24
+
+
+def read_run_csvs(results_dir, kind, model, **read_csv_kwargs):
+    """Read the result CSV of each seed of model, as {run: DataFrame}, skipping missing files."""
+    frames = {}
+    for run in seed_run_names(model):
+        path = Path(results_dir) / RESULT_FILENAME.format(kind=kind, run=run)
+        if not path.exists():
+            warnings.warn(f"Missing {path}, averaging {model} over the remaining seeds")
+            continue
+        frames[run] = pd.read_csv(path, **read_csv_kwargs)
+    return frames
+
+
+def lead_label(lead_hours):
+    return f"{lead_hours}h"
+
+
+def add_common_args(parser):
+    parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
+    parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
+    parser.add_argument(
+        "--legend", action="store_true", help="Also save plots with legend (<name>_with_legend)"
+    )
+    return parser

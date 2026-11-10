@@ -18,7 +18,6 @@ import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
-import plot_common
 import plot_style
 
 LEAD_LABEL = r"Lead time [d]"
@@ -51,7 +50,7 @@ def load_time_series(results_dir):
     """Return {model: {run: time series DataFrame}}."""
     time_series = {}
     for model in plot_style.MODEL_ORDER:
-        runs = plot_common.read_run_csvs(
+        runs = plot_style.read_run_csvs(
             results_dir, "time_series", model, usecols=TIME_SERIES_COLUMNS
         )
         for df in runs.values():
@@ -68,7 +67,7 @@ def load_reference_rmse(results_dir):
     """
     frames = []
     for model in plot_style.MODEL_ORDER:
-        runs = plot_common.read_run_csvs(
+        runs = plot_style.read_run_csvs(
             results_dir, "physics_evaluation", model, usecols=PHYSICS_EVALUATION_COLUMNS
         )
         frames.extend(runs.values())
@@ -155,7 +154,7 @@ def plot_conserved_quantity(time_series, forecast_hours, column, ylabel, out_dir
         for model, runs in time_series.items()
     }
     fig, ax = new_axes()
-    plot_models(ax, curves, forecast_hours / plot_common.HOURS_PER_DAY)
+    plot_models(ax, curves, forecast_hours / plot_style.HOURS_PER_DAY)
     finish_and_save(fig, ax, ylabel, out_dir / f"ts_{column}", "conserved", False)
 
 
@@ -187,7 +186,7 @@ def plot_balance_rmse(
         axis=0,
     )
 
-    lead_days = forecast_hours / plot_common.HOURS_PER_DAY
+    lead_days = forecast_hours / plot_style.HOURS_PER_DAY
     fig, ax = new_axes()
     plot_reference(ax, lead_days, reference_curve)
     plot_models(ax, curves, lead_days)
@@ -230,7 +229,7 @@ def run(results_dir, out_dir, save_with_legend=False):
 
 
 def main():
-    parser = plot_common.add_common_args(argparse.ArgumentParser(description=__doc__))
+    parser = plot_style.add_common_args(argparse.ArgumentParser(description=__doc__))
     args = parser.parse_args()
     run(args.results_dir, args.out_dir, args.legend)
 
