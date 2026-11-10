@@ -9,6 +9,7 @@ text at roughly caption size. Full-page figures (e.g. map grids) are sized so
 two fit side-by-side across the page.
 """
 
+import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
@@ -26,6 +27,26 @@ AXIS_LABEL_FONTSIZE = 8
 TICK_LABEL_FONTSIZE = 6.5
 LEGEND_FONTSIZE = 8
 COLORBAR_LABEL_FONTSIZE = 8
+
+# --- Legends ---
+# Legends drawn inside plots (saved as <name>_with_legend, next to <name> without legend)
+WITH_LEGEND_SUFFIX = "_with_legend"
+IN_PLOT_LEGEND_FONTSIZE = AXIS_LABEL_FONTSIZE
+IN_PLOT_LEGEND_KWARGS = {
+    "framealpha": 0.85,
+    "edgecolor": "0.8",
+    "fancybox": False,
+    "borderpad": 0.3,
+    "labelspacing": 0.15,
+    "handlelength": 2.2,
+    "handletextpad": 0.4,
+    "borderaxespad": 0.3,
+    "columnspacing": 0.8,
+}
+# Separate legend files must fit in one column: at most this many entries per row,
+# and 4 entries as 2 rows of 2
+SEPARATE_LEGEND_MAX_COLUMNS = 3
+SEPARATE_LEGEND_COLUMNSPACING = 1.2
 
 # --- Output ---
 PLOT_FORMATS = ("png", "pdf")
@@ -46,7 +67,8 @@ REFERENCE_LINEWIDTH = 1.0
 # --- Models ---
 # Run names of the 4 seeds of each model are <name>, <name>_1, <name>_2, <name>_3
 SEED_SUFFIXES = ("", "_1", "_2", "_3")
-MODEL_ORDER = ("reprod_train_12e", "mcrps_spectral", "spectral_sht_exp", "var_es_unweight")
+# Ordered so that the two spectral CRPS models share a row in separate legends
+MODEL_ORDER = ("reprod_train_12e", "mcrps_spectral", "var_es_unweight", "spectral_sht_exp")
 MODEL_LABELS = {
     "reprod_train_12e": r"CRPS",
     "mcrps_spectral": r"$\spectralcrps$ (FT)",
@@ -114,7 +136,13 @@ LATEX_PREAMBLE = r"""
 """
 
 
-def apply_style():
+# Set by apply_style: whether save_line_plot also saves <name>_with_legend
+_save_with_legend = False
+
+
+def apply_style(save_with_legend=False):
+    global _save_with_legend
+    _save_with_legend = save_with_legend
     plt.rcParams.update(
         {
             "text.usetex": True,
@@ -162,7 +190,7 @@ def plot_mean_std(ax, x, values_per_seed, model, label=None):
     return line
 
 
-def legend_handles(models=MODEL_ORDER, include_reference=False):
+def legend_handles(models=MODEL_ORDER, include_reference=False, reference_label=REFERENCE_LABEL):
     from matplotlib.lines import Line2D
 
     handles = [Line2D([], [], label=MODEL_LABELS[m], **MODEL_STYLES[m]) for m in models]
@@ -172,7 +200,7 @@ def legend_handles(models=MODEL_ORDER, include_reference=False):
             Line2D(
                 [],
                 [],
-                label=REFERENCE_LABEL,
+                label=reference_label,
                 color=REFERENCE_COLOR,
                 linestyle=REFERENCE_LINESTYLE,
                 linewidth=REFERENCE_LINEWIDTH,
@@ -181,21 +209,54 @@ def legend_handles(models=MODEL_ORDER, include_reference=False):
     return handles
 
 
-def save_figure(fig, out_path_without_suffix):
+def save_figure(fig, out_path_without_suffix, close=True):
     out_path_without_suffix = Path(out_path_without_suffix)
     out_path_without_suffix.parent.mkdir(parents=True, exist_ok=True)
     for fmt in PLOT_FORMATS:
         fig.savefig(
-            out_path_without_suffix.with_suffix(f".{fmt}"),
+            out_path_without_suffix.parent / f"{out_path_without_suffix.name}.{fmt}",
             bbox_inches="tight",
             pad_inches=SAVE_PAD_INCHES,
             dpi=DPI,
         )
-    plt.close(fig)
+    if close:
+        plt.close(fig)
 
 
-def save_legend(out_path_without_suffix, handles, ncol=None):
-    """Render a legend on its own, in a separate file."""
+def add_legend(ax, handles, placement="best"):
+    """Legend inside the axes, at a matplotlib loc."""
+    return ax.legend(handles=handles, loc=placement, fontsize=IN_PLOT_LEGEND_FONTSIZE, **IN_PLOT_LEGEND_KWARGS)
+
+
+def save_line_plot(fig, ax, out_path_without_suffix, handles, placement="best"):
+    """Save <name> without legend, and if enabled in apply_style, <name>_with_legend with the legend in the plot."""
+    out_path_without_suffix = Path(out_path_without_suffix)
+    save_figure(fig, out_path_without_suffix, close=not _save_with_legend)
+    if not _save_with_legend:
+        return
+    add_legend(ax, handles, placement)
+    save_figure(fig, out_path_without_suffix.parent / (out_path_without_suffix.name + WITH_LEGEND_SUFFIX))
+
+
+def separate_legend_columns(num_entries):
+    if num_entries == 4:
+        return 2
+    return min(num_entries, SEPARATE_LEGEND_MAX_COLUMNS)
+
+
+def save_legend(out_path_without_suffix, handles):
+    """Render a legend on its own, in a separate file fitting in one column."""
+    ncol = separate_legend_columns(len(handles))
     fig = plt.figure(figsize=(LEGEND_WIDTH, 0.3))
-    fig.legend(handles=handles, loc="center", ncol=ncol or len(handles), frameon=False)
+    legend = fig.legend(
+        handles=handles,
+        loc="center",
+        ncol=ncol,
+        frameon=False,
+        columnspacing=SEPARATE_LEGEND_COLUMNSPACING,
+    )
+    fig.canvas.draw()
+    legend_width = legend.get_window_extent().width / fig.dpi
+    if legend_width > LEGEND_WIDTH:
+        warnings.warn(f"Legend {out_path_without_suffix} is {legend_width:.2f} in wide, wider than {LEGEND_WIDTH} in")
     save_figure(fig, out_path_without_suffix)

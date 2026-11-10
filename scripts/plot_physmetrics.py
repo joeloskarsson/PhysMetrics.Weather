@@ -36,6 +36,8 @@ BALANCE_RMSES = {
     "geostrophic_rmse": (r"Geostrophic RMSE", r"m/s"),
 }
 DIFF_LABEL_PREFIX = r"$\Delta$"
+# In-plot legend placement per plot kind (matplotlib loc)
+LEGEND_PLACEMENTS = {"conserved": "upper left", "balance": "best", "balance_diff": "best"}
 SERIES_KEYS = ["date", "ensemble_member"]
 TIME_SERIES_COLUMNS = (
     ["date", "forecast_hour", "ensemble_member"]
@@ -132,16 +134,20 @@ def plot_models(ax, curves, lead_days):
         plot_style.plot_mean_std(ax, lead_days, per_seed, model)
 
 
-def finish_and_save(fig, ax, ylabel, out_path, show_legend, include_reference):
+def finish_and_save(fig, ax, ylabel, out_path, kind, include_reference):
     ax.set_xlabel(LEAD_LABEL)
     ax.set_ylabel(ylabel)
     ax.set_xlim(0, None)
-    if show_legend:
-        ax.legend(handles=plot_style.legend_handles(include_reference=include_reference))
-    plot_style.save_figure(fig, out_path)
+    plot_style.save_line_plot(
+        fig,
+        ax,
+        out_path,
+        plot_style.legend_handles(include_reference=include_reference),
+        LEGEND_PLACEMENTS[kind],
+    )
 
 
-def plot_conserved_quantity(time_series, forecast_hours, column, ylabel, out_dir, show_legend):
+def plot_conserved_quantity(time_series, forecast_hours, column, ylabel, out_dir):
     curves = {
         model: per_seed_curves(
             runs, lambda df: relative_change(df, column), forecast_hours, model, column
@@ -150,11 +156,11 @@ def plot_conserved_quantity(time_series, forecast_hours, column, ylabel, out_dir
     }
     fig, ax = new_axes()
     plot_models(ax, curves, forecast_hours / plot_common.HOURS_PER_DAY)
-    finish_and_save(fig, ax, ylabel, out_dir / f"ts_{column}", show_legend, False)
+    finish_and_save(fig, ax, ylabel, out_dir / f"ts_{column}", "conserved", False)
 
 
 def plot_balance_rmse(
-    time_series, reference_rmse, forecast_hours, column, label, unit, out_dir, show_legend
+    time_series, reference_rmse, forecast_hours, column, label, unit, out_dir
 ):
     """Absolute RMSE with ERA5, and difference to ERA5, both only at valid times with ERA5."""
 
@@ -185,7 +191,7 @@ def plot_balance_rmse(
     fig, ax = new_axes()
     plot_reference(ax, lead_days, reference_curve)
     plot_models(ax, curves, lead_days)
-    finish_and_save(fig, ax, f"{label} [{unit}]", out_dir / f"ts_{column}", show_legend, True)
+    finish_and_save(fig, ax, f"{label} [{unit}]", out_dir / f"ts_{column}", "balance", True)
 
     fig, ax = new_axes()
     plot_reference(ax, lead_days, np.zeros_like(lead_days))
@@ -195,13 +201,13 @@ def plot_balance_rmse(
         ax,
         f"{DIFF_LABEL_PREFIX} {label} [{unit}]",
         out_dir / f"ts_{column}_diff",
-        show_legend,
+        "balance_diff",
         True,
     )
 
 
-def run(results_dir, out_dir, show_legend=False):
-    plot_style.apply_style()
+def run(results_dir, out_dir, save_with_legend=False):
+    plot_style.apply_style(save_with_legend=save_with_legend)
     time_series = load_time_series(results_dir)
     reference_rmse = load_reference_rmse(results_dir)
     forecast_hours = np.array(
@@ -212,10 +218,10 @@ def run(results_dir, out_dir, show_legend=False):
         )
     )
     for column, ylabel in CONSERVED_QUANTITIES.items():
-        plot_conserved_quantity(time_series, forecast_hours, column, ylabel, out_dir, show_legend)
+        plot_conserved_quantity(time_series, forecast_hours, column, ylabel, out_dir)
     for column, (label, unit) in BALANCE_RMSES.items():
         plot_balance_rmse(
-            time_series, reference_rmse, forecast_hours, column, label, unit, out_dir, show_legend
+            time_series, reference_rmse, forecast_hours, column, label, unit, out_dir
         )
     plot_style.save_legend(out_dir / "legend", plot_style.legend_handles())
     plot_style.save_legend(

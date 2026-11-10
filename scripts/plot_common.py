@@ -5,7 +5,6 @@ Results of run <run> are in <results_dir>/<kind>_<run>_<YEAR>.csv, with kind one
 physics_evaluation, time_series, spectra.
 """
 
-import argparse
 import warnings
 from pathlib import Path
 
@@ -52,9 +51,6 @@ def add_common_args(parser):
     parser.add_argument("--results-dir", type=Path, default=DEFAULT_RESULTS_DIR)
     parser.add_argument("--out-dir", type=Path, default=DEFAULT_OUT_DIR)
     parser.add_argument(
-        "--legend",
-        action=argparse.BooleanOptionalAction,
-        default=False,
-        help="Draw the legend inside each plot (legend files are always written)",
+        "--legend", action="store_true", help="Also save plots with legend (<name>_with_legend)"
     )
     return parser

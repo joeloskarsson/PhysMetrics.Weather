@@ -7,8 +7,8 @@ For each spectra variable and lead time, writes
 Spectra are averaged over init dates per seed (cached), then shown as mean +- 1 std over seeds.
 
 Usage:
-    python scripts/plot_spectra.py [--results-dir DIR] [--out-dir DIR] [--leads 12 120 240]
-        [--legend] [--no-cache]
+    python scripts/plot_spectra.py [--results-dir DIR] [--out-dir DIR] [--legend] [--leads 12 120 240]
+        [--no-cache]
 """
 
 import argparse
@@ -48,6 +48,8 @@ SPECTRA_POWER_UNITS = {
 WAVENUMBER_LABEL = r"Wavenumber $l$"
 WAVELENGTH_LABEL = r"Wavelength [km]"
 REL_ERROR_LABEL_SUFFIX = "rel. error"
+# In-plot legend placement per plot kind (matplotlib loc)
+LEGEND_PLACEMENTS = {"power": "lower left", "rel_error": "upper left"}
 
 
 def variable_axis_labels(variable):
@@ -142,17 +144,15 @@ def plot_model(ax, wavenumbers, values_per_seed, model):
     plot_style.plot_mean_std(ax, wavenumbers, values_per_seed, model)
 
 
-def finish_axes(ax, wavenumbers, ylabel, show_legend, include_reference):
+def finish_axes(ax, wavenumbers, ylabel):
     ax.set_xscale("log")
     ax.set_xlim(wavenumbers.min(), wavenumbers.max())
     ax.set_xlabel(WAVENUMBER_LABEL)
     ax.set_ylabel(ylabel)
     add_wavelength_axis(ax)
-    if show_legend:
-        ax.legend(handles=plot_style.legend_handles(include_reference=include_reference))
 
 
-def plot_variable_lead(spectra, reference, variable, lead, out_dir, show_legend):
+def plot_variable_lead(spectra, reference, variable, lead, out_dir):
     ref = reference.loc[(lead, variable)]
     wavenumbers = ref.index.to_numpy()
     power_label, rel_error_label = variable_axis_labels(variable)
@@ -170,14 +170,19 @@ def plot_variable_lead(spectra, reference, variable, lead, out_dir, show_legend)
         plot_model(ax_err, wavenumbers, (per_seed - ref.to_numpy()) / ref.to_numpy(), model)
 
     ax.set_yscale("log")
-    finish_axes(ax, wavenumbers, power_label, show_legend, include_reference=True)
-    finish_axes(ax_err, wavenumbers, rel_error_label, show_legend, include_reference=True)
-    plot_style.save_figure(fig, out_dir / f"spectra_{out_name}")
-    plot_style.save_figure(fig_err, out_dir / f"spectra_rel_error_{out_name}")
+    finish_axes(ax, wavenumbers, power_label)
+    finish_axes(ax_err, wavenumbers, rel_error_label)
+    handles = plot_style.legend_handles(include_reference=True)
+    plot_style.save_line_plot(
+        fig, ax, out_dir / f"spectra_{out_name}", handles, LEGEND_PLACEMENTS["power"]
+    )
+    plot_style.save_line_plot(
+        fig_err, ax_err, out_dir / f"spectra_rel_error_{out_name}", handles, LEGEND_PLACEMENTS["rel_error"]
+    )
 
 
-def run(results_dir, out_dir, show_legend=False, leads=None, use_cache=True):
-    plot_style.apply_style()
+def run(results_dir, out_dir, leads=None, use_cache=True, save_with_legend=False):
+    plot_style.apply_style(save_with_legend=save_with_legend)
     cache_dir = out_dir / CACHE_SUBDIR if use_cache else None
     spectra = load_spectra(results_dir, cache_dir)
     reference = reference_spectra(spectra)
@@ -189,7 +194,7 @@ def run(results_dir, out_dir, show_legend=False, leads=None, use_cache=True):
         variables = reference.loc[lead].index.get_level_values("variable").unique()
         for variable in sorted(variables):
             plot_variable_lead(
-                spectra, reference, variable, lead, out_dir / SPECTRA_SUBDIR, show_legend
+                spectra, reference, variable, lead, out_dir / SPECTRA_SUBDIR
             )
     plot_style.save_legend(
         out_dir / "legend_with_reference", plot_style.legend_handles(include_reference=True)
@@ -201,7 +206,7 @@ def main():
     parser.add_argument("--leads", type=int, nargs="+", help="Lead times [h], default all")
     parser.add_argument("--no-cache", action="store_true", help="Do not cache date-mean spectra")
     args = parser.parse_args()
-    run(args.results_dir, args.out_dir, args.legend, args.leads, not args.no_cache)
+    run(args.results_dir, args.out_dir, args.leads, not args.no_cache, args.legend)
 
 
 if __name__ == "__main__":
