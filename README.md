@@ -182,7 +182,7 @@ physmetrics-plot --results-dir ./results --outdir ./plots
 `scripts/plot_all.sh [--results-dir DIR] [--out-dir DIR] [--legend]` generates all paper plots from the result CSVs (default `results/ucast/` → `result_plots/paper/`), averaging over the seed runs of each model. Legends are saved as separate files; with `--legend`, line plots are also saved with an in-plot legend (`*_with_legend`):
 
 - `scripts/plot_physmetrics.py`: time series of dry air mass, water mass and total energy change, and hydrostatic/geostrophic balance RMSE vs. lead time.
-- `scripts/plot_spectra.py`: power spectra and their relative error w.r.t. ERA5, per variable and lead time.
+- `scripts/plot_spectra.py`: spherical-harmonic and zonal power spectra and their relative error w.r.t. ERA5, per variable and lead time.
 - `scripts/plot_style.py`: shared plot style (kept in sync with the copy in the U-cast repo), plus result paths and common CLI arguments.
 
 ---
