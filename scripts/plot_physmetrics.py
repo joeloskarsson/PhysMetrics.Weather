@@ -1,6 +1,5 @@
 """
-Paper plots of physmetrics time series vs. lead time (as in physmetrics-plot, without lapse
-rate distributions and tables), shown as mean +- 1 std over seeds.
+Paper plots of physmetrics time series vs. lead time.
 
 Writes to the output dir
     ts_<conserved quantity>.{png,pdf}   relative change [%] w.r.t. the first lead, mean over dates
@@ -13,6 +12,7 @@ Usage:
 
 import argparse
 import warnings
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -46,33 +46,37 @@ TIME_SERIES_COLUMNS = (
 PHYSICS_EVALUATION_COLUMNS = ["date", "lead_time_hours", "metric_name", "ref_value"]
 
 
+def drop_missing(df, columns, description):
+    """Drop rows with NaN in any of columns, warning if any are dropped."""
+    keep = df[columns].notna().all(axis=1)
+    if not keep.all():
+        warnings.warn(f"{description}: dropping {(~keep).sum()} of {len(df)} rows with missing {columns}")
+    return df[keep]
+
+
 def load_time_series(results_dir):
     """Return {model: {run: time series DataFrame}}."""
     time_series = {}
     for model in plot_style.MODEL_ORDER:
-        runs = plot_style.read_run_csvs(
-            results_dir, "time_series", model, usecols=TIME_SERIES_COLUMNS
-        )
-        for df in runs.values():
-            df["date"] = pd.to_datetime(df["date"])
-        time_series[model] = runs
+        time_series[model] = {}
+        for run in plot_style.seed_run_names(model):
+            path = Path(results_dir) / plot_style.RESULT_FILENAME.format(kind="time_series", run=run)
+            time_series[model][run] = pd.read_csv(path, usecols=TIME_SERIES_COLUMNS, parse_dates=["date"])
     return time_series
 
 
 def load_reference_rmse(results_dir):
     """ERA5 balance RMSEs indexed by valid time, with a column per metric.
 
-    ERA5 RMSEs only exist in physics_evaluation, at its (sparser) lead times; all runs are
-    combined to cover as many valid times as possible.
+    ERA5 values only exist in physics_evaluation, at fewer lead times than time_series, so they
+    are matched to forecasts by valid time. They are the same for all runs, so one run is read.
     """
-    frames = []
-    for model in plot_style.MODEL_ORDER:
-        runs = plot_style.read_run_csvs(
-            results_dir, "physics_evaluation", model, usecols=PHYSICS_EVALUATION_COLUMNS
-        )
-        frames.extend(runs.values())
-    df = pd.concat(frames)
-    df = df[df["metric_name"].isin(BALANCE_RMSES)].dropna(subset=["ref_value"])
+    run = plot_style.MODEL_ORDER[0]
+    df = pd.read_csv(
+        Path(results_dir) / plot_style.RESULT_FILENAME.format(kind="physics_evaluation", run=run),
+        usecols=PHYSICS_EVALUATION_COLUMNS,
+    )
+    df = drop_missing(df[df["metric_name"].isin(BALANCE_RMSES)], ["ref_value"], f"ERA5 balance RMSEs ({run})")
     df["valid_time"] = pd.to_datetime(df["date"]) + pd.to_timedelta(
         df["lead_time_hours"], unit="h"
     )
@@ -81,7 +85,7 @@ def load_reference_rmse(results_dir):
 
 def relative_change(df, column):
     """Change [%] w.r.t. the value at the first forecast lead of each forecast."""
-    df = df.dropna(subset=[column]).sort_values("forecast_hour")
+    df = drop_missing(df, [column], column).sort_values("forecast_hour")
     first = df.groupby(SERIES_KEYS)[column].transform("first")
     return (df[column] - first) / first * PERCENT
 
@@ -94,20 +98,22 @@ def per_seed_curves(runs, values_fn, forecast_hours, model, quantity):
         curve = values.groupby(df.loc[values.index, "forecast_hour"]).mean()
         missing = set(forecast_hours) - set(curve.index)
         if missing:
-            warnings.warn(f"{model}: {quantity} missing at forecast hours {sorted(missing)}")
+            raise ValueError(f"{model}: {quantity} missing at forecast hours {sorted(missing)}")
         curves.append(curve.reindex(forecast_hours).to_numpy())
-    n_seeds = len(plot_style.SEED_SUFFIXES)
-    if len(curves) < n_seeds:
-        warnings.warn(f"{model}: {quantity} available for {len(curves)}/{n_seeds} seeds")
     return np.array(curves)
 
 
-def with_reference(df, reference_rmse, column):
-    """ERA5 values of column at the valid time of each row (NaN where not evaluated)."""
+def with_reference(df, reference_rmse, column, run):
+    """Model and ERA5 values of column per row, with ERA5 taken at the row's valid time."""
     valid_time = df["date"] + pd.to_timedelta(df["forecast_hour"], unit="h")
-    return pd.Series(
-        reference_rmse[column].reindex(valid_time).to_numpy(), index=df.index
+    matched = pd.DataFrame(
+        {
+            "forecast_hour": df["forecast_hour"],
+            "model": df[column],
+            "reference": reference_rmse[column].reindex(valid_time).to_numpy(),
+        }
     )
+    return drop_missing(matched, ["model", "reference"], f"{run} {column}")
 
 
 def new_axes():
@@ -128,8 +134,6 @@ def plot_reference(ax, lead_days, values):
 
 def plot_models(ax, curves, lead_days):
     for model, per_seed in curves.items():
-        if per_seed.size == 0:
-            continue
         plot_style.plot_mean_std(ax, lead_days, per_seed, model)
 
 
@@ -161,29 +165,18 @@ def plot_conserved_quantity(time_series, forecast_hours, column, ylabel, out_dir
 def plot_balance_rmse(
     time_series, reference_rmse, forecast_hours, column, label, unit, out_dir
 ):
-    """Absolute RMSE with ERA5, and difference to ERA5, both only at valid times with ERA5."""
-
-    def matched(df):
-        reference = with_reference(df, reference_rmse, column)
-        keep = reference.notna() & df[column].notna()
-        return df.loc[keep, column], reference[keep]
-
+    """Absolute RMSE with ERA5, and difference to ERA5, both at the same valid times."""
     curves = {}
     diff_curves = {}
-    reference_runs = {}
     for model, runs in time_series.items():
-        curves[model] = per_seed_curves(
-            runs, lambda df: matched(df)[0], forecast_hours, model, column
-        )
+        matched = {run: with_reference(df, reference_rmse, column, run) for run, df in runs.items()}
+        curves[model] = per_seed_curves(matched, lambda df: df["model"], forecast_hours, model, column)
         diff_curves[model] = per_seed_curves(
-            runs, lambda df: matched(df)[0] - matched(df)[1], forecast_hours, model, column
+            matched, lambda df: df["model"] - df["reference"], forecast_hours, model, column
         )
-        reference_runs.update(runs)
-    reference_curve = np.nanmean(
-        per_seed_curves(
-            reference_runs, lambda df: matched(df)[1], forecast_hours, "ERA5", column
-        ),
-        axis=0,
+    # ERA5 values are the same in all runs, so one run is used
+    (reference_curve,) = per_seed_curves(
+        {"ERA5": next(iter(matched.values()))}, lambda df: df["reference"], forecast_hours, "ERA5", column
     )
 
     lead_days = forecast_hours / plot_style.HOURS_PER_DAY

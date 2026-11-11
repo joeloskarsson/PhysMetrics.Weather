@@ -1,11 +1,10 @@
-"""Shared plot style (as in ucast/scripts/plot_style.py), plus loading of physmetrics result CSVs"""
+"""Shared plot style (as in ucast/scripts/plot_style.py), plus physmetrics result paths and CLI args"""
 
 import warnings
 from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
-import pandas as pd
 
 # --- Sizes, in inches ---
 COLUMN_WIDTH = 3.25
@@ -173,11 +172,13 @@ def seed_run_names(model):
 def plot_mean_std(ax, x, values_per_seed, model, label=None):
     """Plot mean over seeds (axis 0 of values_per_seed) with a +-1 std band."""
     values_per_seed = np.asarray(values_per_seed, dtype=float)
-    mean = np.nanmean(values_per_seed, axis=0)
+    if np.isnan(values_per_seed).any():
+        raise ValueError(f"{model}: missing values in {values_per_seed.shape} array of seeds x points")
+    mean = np.mean(values_per_seed, axis=0)
     style = MODEL_STYLES[model]
     (line,) = ax.plot(x, mean, label=label or MODEL_LABELS[model], **style)
     if values_per_seed.shape[0] > 1:
-        std = np.nanstd(values_per_seed, axis=0, ddof=STD_DDOF)
+        std = np.std(values_per_seed, axis=0, ddof=STD_DDOF)
         ax.fill_between(x, mean - std, mean + std, color=style["color"], alpha=BAND_ALPHA, linewidth=0)
     return line
 
@@ -215,30 +216,19 @@ def save_figure(fig, out_path_without_suffix, close=True):
         plt.close(fig)
 
 
-def add_legend(ax, handles, placement="best"):
-    """Legend inside the axes, at a matplotlib loc."""
-    return ax.legend(handles=handles, loc=placement, fontsize=IN_PLOT_LEGEND_FONTSIZE, **IN_PLOT_LEGEND_KWARGS)
-
-
 def save_line_plot(fig, ax, out_path_without_suffix, handles, placement="best"):
     """Save <name> without legend, and if enabled in apply_style, <name>_with_legend with the legend in the plot."""
     out_path_without_suffix = Path(out_path_without_suffix)
     save_figure(fig, out_path_without_suffix, close=not _save_with_legend)
     if not _save_with_legend:
         return
-    add_legend(ax, handles, placement)
+    ax.legend(handles=handles, loc=placement, fontsize=IN_PLOT_LEGEND_FONTSIZE, **IN_PLOT_LEGEND_KWARGS)
     save_figure(fig, out_path_without_suffix.parent / (out_path_without_suffix.name + WITH_LEGEND_SUFFIX))
-
-
-def separate_legend_columns(num_entries):
-    if num_entries == 4:
-        return 2
-    return min(num_entries, SEPARATE_LEGEND_MAX_COLUMNS)
 
 
 def save_legend(out_path_without_suffix, handles):
     """Render a legend on its own, in a separate file fitting in one column."""
-    ncol = separate_legend_columns(len(handles))
+    ncol = 2 if len(handles) == 4 else min(len(handles), SEPARATE_LEGEND_MAX_COLUMNS)
     fig = plt.figure(figsize=(LEGEND_WIDTH, 0.3))
     legend = fig.legend(
         handles=handles,
@@ -254,30 +244,14 @@ def save_legend(out_path_without_suffix, handles):
     save_figure(fig, out_path_without_suffix)
 
 
-# ===== Physmetrics result loading (not in the ucast copy) =====
+# ===== Physmetrics result paths and CLI args (not in the ucast copy) =====
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
-DEFAULT_RESULTS_DIR = REPO_ROOT / "results" / "ucast"
-DEFAULT_OUT_DIR = REPO_ROOT / "result_plots" / "paper"
+DEFAULT_RESULTS_DIR = REPO_ROOT / "results" / "ucast_res_models"
+DEFAULT_OUT_DIR = REPO_ROOT / "result_plots" / "paper_plots_res_models"
 RESULT_FILENAME = "{kind}_{run}_2020.csv"
 
 HOURS_PER_DAY = 24
-
-
-def read_run_csvs(results_dir, kind, model, **read_csv_kwargs):
-    """Read the result CSV of each seed of model, as {run: DataFrame}, skipping missing files."""
-    frames = {}
-    for run in seed_run_names(model):
-        path = Path(results_dir) / RESULT_FILENAME.format(kind=kind, run=run)
-        if not path.exists():
-            warnings.warn(f"Missing {path}, averaging {model} over the remaining seeds")
-            continue
-        frames[run] = pd.read_csv(path, **read_csv_kwargs)
-    return frames
-
-
-def lead_label(lead_hours):
-    return f"{lead_hours}h"
 
 
 def add_common_args(parser):
