@@ -45,6 +45,7 @@ docs = [
 [project.scripts]
 physmetrics-run = "physmetrics_weather.run_all_metrics:main"
 physmetrics-plot = "physmetrics_weather.plot_neurips_metrics:main"
+physmetrics-ref-balance = "physmetrics_weather.run_all_metrics:main_reference_balance"
 
 [tool.setuptools.packages.find]
 where = ["src"]

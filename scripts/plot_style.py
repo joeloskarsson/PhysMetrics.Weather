@@ -250,6 +250,8 @@ REPO_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_RESULTS_DIR = REPO_ROOT / "results" / "ucast_res_models"
 DEFAULT_OUT_DIR = REPO_ROOT / "result_plots" / "paper_plots_res_models"
 RESULT_FILENAME = "{kind}_{run}_2020.csv"
+# ERA5 balance RMSEs per valid time, written by physmetrics-ref-balance
+REFERENCE_BALANCE_FILENAME = "reference_balance_2020.csv"
 
 HOURS_PER_DAY = 24
 

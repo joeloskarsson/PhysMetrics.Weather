@@ -105,6 +105,14 @@ DRIFT_WINDOW_END: Dict[int, np.timedelta64] = {
 
 DEFAULT_WORKERS: int = 4
 
+NEEDED_VARS = frozenset().union(
+    T_NAMES, PHI_NAMES, U_NAMES, V_NAMES, Q_NAMES, MSL_NAMES, SP_NAMES, T2M_NAMES, ZSFC_NAMES
+)
+BALANCE_VARS = frozenset().union(T_NAMES, PHI_NAMES, U_NAMES, V_NAMES, Q_NAMES)
+
+REFERENCE_BALANCE_MAX_LEAD = "10d"
+REFERENCE_BALANCE_STEP = "6h"
+
 
 @dataclass
 class EvaluationConfig:
@@ -184,6 +192,11 @@ def open_zarr_anonymous(url: str) -> xr.Dataset:
     if rename:
         ds = ds.rename(rename)
     return ds
+
+
+def _keep_vars(ds: xr.Dataset, names: frozenset) -> xr.Dataset:
+    """Drop all data variables whose (stripped) name is not in `names`."""
+    return ds.drop_vars([v for v in ds.data_vars if v.strip() not in names])
 
 
 def load_static_fields(ds_ref: xr.Dataset) -> xr.Dataset:
@@ -620,23 +633,7 @@ def _evaluate_one(
                     f"with {len(ens_members)} members."
                 )
 
-            _NEEDED_VARS = set()
-            var_tuples = (
-                T_NAMES,
-                PHI_NAMES,
-                U_NAMES,
-                V_NAMES,
-                Q_NAMES,
-                MSL_NAMES,
-                SP_NAMES,
-                T2M_NAMES,
-                ZSFC_NAMES,
-            )
-            for names in var_tuples:
-                _NEEDED_VARS.update(names)
-            drop_vars = [v for v in ds_model_t.data_vars if v.strip() not in _NEEDED_VARS]
-            if drop_vars:
-                ds_model_t = ds_model_t.drop_vars(drop_vars)
+            ds_model_t = _keep_vars(ds_model_t, NEEDED_VARS)
 
             if "time" in ds_model_t.dims:
                 ds_model_t = ds_model_t.isel(time=0)
@@ -790,9 +787,7 @@ def _evaluate_one(
                 hours_ref = np.array([float(td / np.timedelta64(1, "h")) for td in avail_tds])
                 try:
                     ds_ref_window = ds_ref_full.sel(time=init_time + avail_tds)
-                    ds_ref_window = ds_ref_window.drop_vars(
-                        [v for v in ds_ref_window.data_vars if v.strip() not in _NEEDED_VARS]
-                    )
+                    ds_ref_window = _keep_vars(ds_ref_window, NEEDED_VARS)
                     ref_level_dim_d = _detect_level_dim(ds_ref_window)
                     ps_ref_window = _get_ps(ds_ref_window, ds_static, level_dim=ref_level_dim_d)
                     _, water_ref_series, energy_ref_series = compute_conservation_scalars(
@@ -843,7 +838,7 @@ def _evaluate_one(
                             ref_geo = float(compute_geostrophic_imbalance(ds_ref_t, area, level_dim=ref_ld))
                         except (ValueError, KeyError, AttributeError):
                             pass
-                            
+
                     if len(hydro_vals) > 0:
                         _append_summary("hydrostatic_rmse", float(hydro_vals[-1]), ref_hydro, ens_member=m)
                         _append_summary("geostrophic_rmse", float(geo_vals[-1]), ref_geo, ens_member=m)
@@ -1311,15 +1306,72 @@ def run_evaluation(
 
 
 # ============================================================================
+# Reference Balance Time Series
+# ============================================================================
+
+
+def reference_valid_times(
+    init_dates: List[str], max_lead: np.timedelta64, step: str
+) -> pd.DatetimeIndex:
+    """All valid times from the first init date to the last init date + max_lead, every step."""
+    init_times = pd.to_datetime(init_dates)
+    return pd.date_range(init_times.min(), init_times.max() + pd.Timedelta(max_lead), freq=step)
+
+
+def _evaluate_reference_balance(ref_zarr_path: str, valid_times: pd.DatetimeIndex) -> pd.DataFrame:
+    """Hydrostatic and geostrophic balance RMSEs of the reference at each of valid_times."""
+    dask.config.set(scheduler="synchronous")
+    ds_ref_full = open_zarr_anonymous(ref_zarr_path)
+    area = get_grid_cell_area(ds_ref_full.isel(time=0, drop=True))
+    ds_ref = _keep_vars(ds_ref_full.sel(time=valid_times), BALANCE_VARS).load()
+    level_dim = _detect_level_dim(ds_ref)
+    return pd.DataFrame(
+        {
+            "valid_time": valid_times,
+            "hydrostatic_rmse": compute_hydrostatic_imbalance(ds_ref, area, level_dim=level_dim).values,
+            "geostrophic_rmse": compute_geostrophic_imbalance(ds_ref, area, level_dim=level_dim).values,
+        }
+    )
+
+
+def run_reference_balance(
+    ref_zarr: str,
+    valid_times: pd.DatetimeIndex,
+    output_csv: Path,
+    workers: int = DEFAULT_WORKERS,
+    verbose: bool = True,
+) -> pd.DataFrame:
+    """Compute reference balance RMSEs at all valid_times, one task per day, and save as CSV.
+
+    Output columns: valid_time | hydrostatic_rmse | geostrophic_rmse
+    """
+    chunks = [times for _, times in valid_times.to_series().groupby(valid_times.normalize())]
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = [
+            pool.submit(_evaluate_reference_balance, ref_zarr, pd.DatetimeIndex(times))
+            for times in chunks
+        ]
+        completed = as_completed(futures)
+        if verbose:
+            completed = tqdm(
+                completed, total=len(futures), desc="Reference balance", unit="day"
+            )
+        df = pd.concat([fut.result() for fut in completed])
+
+    df = df.sort_values("valid_time").reset_index(drop=True)
+    output_csv.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(output_csv, index=False)
+    if verbose:
+        print(f"  ✓ Reference balance saved → {output_csv} ({len(df)} rows)")
+    return df
+
+
+# ============================================================================
 # CLI Command Entrypoint
 # ============================================================================
 
 
-def main() -> None:
-    """CLI entrypoint for physmetrics-run command."""
-    parser = argparse.ArgumentParser(
-        description="Physics evaluation for AI weather models (WB2 Zarr streaming)"
-    )
+def _add_date_args(parser: argparse.ArgumentParser) -> None:
     parser.add_argument("--year", type=int, default=2020, help="Year to evaluate (default: 2020).")
     parser.add_argument(
         "--dates", nargs="+", default=None, help="Dates to evaluate (e.g. 2020-01-01 2020-01-15)."
@@ -1327,6 +1379,70 @@ def main() -> None:
     parser.add_argument(
         "--month", type=str, default=None, help="Evaluate all days of month (e.g. 2020-01)."
     )
+
+
+def main_reference_balance() -> None:
+    """CLI entrypoint for physmetrics-ref-balance command."""
+    parser = argparse.ArgumentParser(
+        description=(
+            "Precompute hydrostatic/geostrophic balance RMSEs of the reference dataset at every "
+            "valid time reached by forecasts initialized at the given dates."
+        )
+    )
+    _add_date_args(parser)
+    parser.add_argument(
+        "--max-lead",
+        type=str,
+        default=REFERENCE_BALANCE_MAX_LEAD,
+        help=f"Longest forecast lead time to cover (default: {REFERENCE_BALANCE_MAX_LEAD}).",
+    )
+    parser.add_argument(
+        "--step",
+        type=str,
+        default=REFERENCE_BALANCE_STEP,
+        help=f"Spacing of valid times, as a pandas frequency (default: {REFERENCE_BALANCE_STEP}).",
+    )
+    parser.add_argument(
+        "--ref-zarr", type=str, default=REF_ZARR, help="Path/URL to reference Zarr."
+    )
+    parser.add_argument(
+        "--workers",
+        type=int,
+        default=DEFAULT_WORKERS,
+        help=f"Worker process count (default: {DEFAULT_WORKERS}).",
+    )
+    parser.add_argument("--output", type=str, default=None, help="Output CSV file path.")
+    parser.add_argument(
+        "--output-dir",
+        type=str,
+        default=str(DEFAULT_OUTPUT_DIR),
+        help="Output directory, used if --output is not given.",
+    )
+    parser.add_argument("--quiet", action="store_true", help="Suppress output logging.")
+    args = parser.parse_args()
+
+    dates = _resolve_dates(args)
+    ((_, max_lead),) = _parse_lead_times(args.max_lead)
+    if args.output:
+        output_csv = Path(args.output)
+    else:
+        output_csv = Path(args.output_dir) / f"reference_balance_{args.year}.csv"
+
+    run_reference_balance(
+        ref_zarr=args.ref_zarr,
+        valid_times=reference_valid_times(dates, max_lead, args.step),
+        output_csv=output_csv,
+        workers=args.workers,
+        verbose=not args.quiet,
+    )
+
+
+def main() -> None:
+    """CLI entrypoint for physmetrics-run command."""
+    parser = argparse.ArgumentParser(
+        description="Physics evaluation for AI weather models (WB2 Zarr streaming)"
+    )
+    _add_date_args(parser)
     parser.add_argument(
         "--workers",
         type=int,

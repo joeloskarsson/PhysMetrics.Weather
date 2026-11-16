@@ -6,6 +6,9 @@ Writes to the output dir
     ts_<balance>_rmse.{png,pdf}         balance error RMSE, models + ERA5 at the same valid times
     ts_<balance>_rmse_diff.{png,pdf}    model RMSE - ERA5 RMSE at the same valid times
 
+ERA5 balance RMSEs are read from plot_style.REFERENCE_BALANCE_FILENAME in the results dir,
+precomputed with physmetrics-ref-balance (scripts/submit_ref_balance.sh).
+
 Usage:
     python scripts/plot_physmetrics.py [--results-dir DIR] [--out-dir DIR] [--legend]
 """
@@ -43,7 +46,6 @@ TIME_SERIES_COLUMNS = (
     + list(CONSERVED_QUANTITIES)
     + list(BALANCE_RMSES)
 )
-PHYSICS_EVALUATION_COLUMNS = ["date", "lead_time_hours", "metric_name", "ref_value"]
 
 
 def drop_missing(df, columns, description):
@@ -66,21 +68,13 @@ def load_time_series(results_dir):
 
 
 def load_reference_rmse(results_dir):
-    """ERA5 balance RMSEs indexed by valid time, with a column per metric.
-
-    ERA5 values only exist in physics_evaluation, at fewer lead times than time_series, so they
-    are matched to forecasts by valid time. They are the same for all runs, so one run is read.
-    """
-    run = plot_style.MODEL_ORDER[0]
-    df = pd.read_csv(
-        Path(results_dir) / plot_style.RESULT_FILENAME.format(kind="physics_evaluation", run=run),
-        usecols=PHYSICS_EVALUATION_COLUMNS,
+    """ERA5 balance RMSEs indexed by valid time, with a column per metric."""
+    return pd.read_csv(
+        Path(results_dir) / plot_style.REFERENCE_BALANCE_FILENAME,
+        usecols=["valid_time", *BALANCE_RMSES],
+        parse_dates=["valid_time"],
+        index_col="valid_time",
     )
-    df = drop_missing(df[df["metric_name"].isin(BALANCE_RMSES)], ["ref_value"], f"ERA5 balance RMSEs ({run})")
-    df["valid_time"] = pd.to_datetime(df["date"]) + pd.to_timedelta(
-        df["lead_time_hours"], unit="h"
-    )
-    return df.pivot_table(index="valid_time", columns="metric_name", values="ref_value")
 
 
 def relative_change(df, column):
@@ -106,14 +100,21 @@ def per_seed_curves(runs, values_fn, forecast_hours, model, quantity):
 def with_reference(df, reference_rmse, column, run):
     """Model and ERA5 values of column per row, with ERA5 taken at the row's valid time."""
     valid_time = df["date"] + pd.to_timedelta(df["forecast_hour"], unit="h")
+    reference = reference_rmse[column].reindex(valid_time)
+    if reference.isna().any():
+        missing = reference.index[reference.isna()].unique()
+        raise ValueError(
+            f"{run} {column}: ERA5 reference missing at {len(missing)} valid times "
+            f"(first: {missing[0]}), check {plot_style.REFERENCE_BALANCE_FILENAME}"
+        )
     matched = pd.DataFrame(
         {
             "forecast_hour": df["forecast_hour"],
             "model": df[column],
-            "reference": reference_rmse[column].reindex(valid_time).to_numpy(),
+            "reference": reference.to_numpy(),
         }
     )
-    return drop_missing(matched, ["model", "reference"], f"{run} {column}")
+    return drop_missing(matched, ["model"], f"{run} {column}")
 
 
 def new_axes():

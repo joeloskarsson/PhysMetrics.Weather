@@ -43,6 +43,23 @@ CLI Example:
       --workers 4 \
       --output-dir ./results
 
+Reference Balance Time Series (physmetrics-ref-balance)
+~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
+
+``physmetrics-run`` only reports the reference hydrostatic and geostrophic balance RMSEs at the
+evaluated lead times. These RMSEs depend only on the valid time, so
+``physmetrics-ref-balance`` computes them for every valid time from the first init date to the last
+init date plus ``--max-lead`` (default ``10d``), every ``--step`` (default ``6h``). The output CSV
+has the columns ``valid_time,hydrostatic_rmse,geostrophic_rmse``.
+
+.. code-block:: bash
+
+   physmetrics-ref-balance \
+      --ref-zarr gs://weatherbench2/datasets/era5/1959-2023_01_10-wb13-6h-1440x721_with_derived_variables.zarr \
+      --year 2020 \
+      --workers 4 \
+      --output-dir ./results
+
 Generating Visualizations (physmetrics-plot)
 ~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~~
 
