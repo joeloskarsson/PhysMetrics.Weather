@@ -138,9 +138,21 @@ def plot_models(ax, curves, lead_days):
         plot_style.plot_mean_std(ax, lead_days, per_seed, model)
 
 
+def set_ylabel_below_top(ax, ylabel):
+    """Set the y label centered, or aligned with the top of the axes if it is taller than them.
+
+    A centered label taller than the axes sticks out above the plot, while there is free space
+    below the axes next to the x label.
+    """
+    ax.set_ylabel(ylabel)
+    renderer = ax.figure.canvas.get_renderer()
+    if ax.yaxis.label.get_window_extent(renderer).height > ax.get_window_extent(renderer).height:
+        ax.set_ylabel(ylabel, loc="top")
+
+
 def finish_and_save(fig, ax, ylabel, out_path, kind, include_reference):
     ax.set_xlabel(LEAD_LABEL)
-    ax.set_ylabel(ylabel)
+    set_ylabel_below_top(ax, ylabel)
     ax.set_xlim(0, None)
     plot_style.save_line_plot(
         fig,
