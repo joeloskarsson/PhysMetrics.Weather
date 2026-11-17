@@ -82,11 +82,12 @@ pip install -e ".[dev,docs]"
 pip install git+https://github.com/Emmakast/PhysMetrics.Weather.git
 ```
 
-After installation, the CLI commands `physmetrics-run` and `physmetrics-plot` are available on your system `PATH`:
+After installation, the CLI commands `physmetrics-run`, `physmetrics-ref-balance` and `physmetrics-plot` are available on your system `PATH`:
 
 | Command | Description |
 |---|---|
 | `physmetrics-run` | Stream WeatherBench 2 Zarr data, run physics metrics, output long-format CSV |
+| `physmetrics-ref-balance` | Precompute reference (ERA5) hydrostatic/geostrophic balance RMSEs at every valid time covered by the forecasts |
 | `physmetrics-plot` | Generate publication-ready figures and visualization plots from output CSVs |
 
 ---
@@ -176,6 +177,14 @@ physmetrics-plot --results-dir ./results --outdir ./plots
 | `--results-dir` | `./results` | Path to directory containing output CSV files |
 | `--outdir` | `./plots` | Path to directory for saving generated figures |
 | `--reference-label` | `auto` | Reference dataset label override (`auto`, `ERA5`, `IFS`) |
+
+### Paper plots (`scripts/`)
+
+`scripts/plot_all.sh [--results-dir DIR] [--out-dir DIR] [--legend]` generates all paper plots from the result CSVs (default `results/ucast/` → `result_plots/paper/`), averaging over the seed runs of each model. Legends are saved as separate files; with `--legend`, line plots are also saved with an in-plot legend (`*_with_legend`):
+
+- `scripts/plot_physmetrics.py`: time series of dry air mass, water mass and total energy change, and hydrostatic/geostrophic balance RMSE vs. lead time. The ERA5 balance reference is read from `reference_balance_2020.csv` in the results dir, generated with `physmetrics-ref-balance` (`sbatch scripts/submit_ref_balance.sh`).
+- `scripts/plot_spectra.py`: spherical-harmonic and zonal power spectra and their relative error w.r.t. ERA5, per variable and lead time.
+- `scripts/plot_style.py`: shared plot style (kept in sync with the copy in the U-cast repo), plus result paths and common CLI arguments.
 
 ---
 

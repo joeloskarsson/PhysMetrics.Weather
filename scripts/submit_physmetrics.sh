@@ -21,7 +21,7 @@ set -euo pipefail
 
 PHYS_DIR=/capstor/store/cscs/swissai/ab016/ojoel/physmetrics
 # ERA5 on the same 1.5deg grid the forecasts were made on
-REF_ZARR=/capstor/store/cscs/swissai/ab016/ERA5_coarse/era5_1.5deg.zarr
+REF_ZARR=/iopsstor/datacache/cscs/swissai/ab016/era5_1.5deg.zarr
 OUTPUT_DIR=results/ucast
 
 if [[ $# -lt 2 ]]; then

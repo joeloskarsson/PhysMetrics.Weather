@@ -2,9 +2,15 @@
 
 import argparse
 import numpy as np
+import pandas as pd
 import pytest
 import xarray as xr
 
+from physmetrics_weather.physics_metrics import (
+    compute_geostrophic_imbalance,
+    compute_hydrostatic_imbalance,
+    get_grid_cell_area,
+)
 from physmetrics_weather.run_all_metrics import (
     _align_ref_to_model,
     _grids_match,
@@ -12,6 +18,8 @@ from physmetrics_weather.run_all_metrics import (
     _parse_spectra_spec,
     _resolve_dates,
     _spectrum_label,
+    reference_valid_times,
+    run_reference_balance,
 )
 
 
@@ -93,3 +101,51 @@ def test_spectrum_label():
     assert _spectrum_label(ds, "MSL", 850.0)[0] == "MSL"
     with pytest.raises(KeyError):
         _spectrum_label(ds, "Q", None)
+
+
+def test_reference_valid_times():
+    """Valid times span from the first init date to the last init date + max lead."""
+    times = reference_valid_times(
+        ["2020-12-30T00:00:00", "2020-12-31T00:00:00"], np.timedelta64(24, "h"), "6h"
+    )
+    assert times[0] == pd.Timestamp("2020-12-30T00:00:00")
+    assert times[-1] == pd.Timestamp("2021-01-01T00:00:00")
+    assert len(times) == 9
+
+
+def test_run_reference_balance(tmp_path):
+    """Reference balance CSV matches the balance metrics computed on single time slices."""
+    rng = np.random.default_rng(0)
+    times = pd.date_range("2020-01-01", periods=6, freq="12h")
+    levels = np.array([1000.0, 850.0, 500.0, 250.0])
+    lats = np.linspace(90, -90, 16)
+    lons = np.arange(32) * 11.25
+    shape = (len(times), len(levels), len(lats), len(lons))
+    dims = ["time", "level", "latitude", "longitude"]
+    ds = xr.Dataset(
+        {
+            "temperature": (dims, 260.0 + rng.normal(0, 5, shape)),
+            "specific_humidity": (dims, np.abs(rng.normal(0, 0.005, shape))),
+            "u_component_of_wind": (dims, rng.normal(0, 10, shape)),
+            "v_component_of_wind": (dims, rng.normal(0, 10, shape)),
+            "geopotential": (
+                dims,
+                np.broadcast_to(1e4 * np.log(1000.0 / levels)[:, None, None], shape[1:])
+                + rng.normal(0, 50, shape),
+            ),
+        },
+        coords={"time": times, "level": levels, "latitude": lats, "longitude": lons},
+    )
+    zarr_path = str(tmp_path / "ref.zarr")
+    ds.to_zarr(zarr_path)
+
+    out_csv = tmp_path / "reference_balance_2020.csv"
+    run_reference_balance(zarr_path, times, out_csv, workers=1, verbose=False)
+    df = pd.read_csv(out_csv, parse_dates=["valid_time"])
+
+    assert list(df["valid_time"]) == list(times)
+    area = get_grid_cell_area(ds.isel(time=0, drop=True))
+    for row, time in zip(df.itertuples(), times):
+        ds_t = ds.sel(time=time)
+        assert row.hydrostatic_rmse == pytest.approx(float(compute_hydrostatic_imbalance(ds_t, area)))
+        assert row.geostrophic_rmse == pytest.approx(float(compute_geostrophic_imbalance(ds_t, area)))
